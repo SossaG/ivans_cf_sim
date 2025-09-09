@@ -24,3 +24,14 @@
   ros_type_name: "sensor_msgs/msg/LaserScan"
   gz_type_name: "ignition.msgs.LaserScan"
   direction: GZ_TO_ROS
+- ros_topic_name: "/crazyflie/range_up_scan"
+  gz_topic_name: "/range_up_scan"
+  ros_type_name: "sensor_msgs/msg/LaserScan"
+  gz_type_name: "ignition.msgs.LaserScan"
+  direction: GZ_TO_ROS
+- ros_topic_name: "/crazyflie/range_down_scan"
+  gz_topic_name: "/range_down_scan"
+  ros_type_name: "sensor_msgs/msg/LaserScan"
+  gz_type_name: "ignition.msgs.LaserScan"
+  direction: GZ_TO_ROS
+
