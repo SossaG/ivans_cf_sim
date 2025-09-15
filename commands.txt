@@ -18,3 +18,6 @@ ros2 run crazyflie_pointcloud multiranger_to_pointcloud \
 ros2 run teleop_twist_keyboard teleop_twist_keyboard
 
 ros2 launch crazyflie_ros2_multiranger_bringup simple_mapper_simulation.launch.py
+
+
+ros2 launch cf3d_nav cf3d_nav_full.launch.py
