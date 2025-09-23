@@ -83,6 +83,8 @@ class CF3DExplorer(Node):
         self.declare_parameter('repulse_gain', 0.3)      # weight of repulsion
         self.declare_parameter('loop_rate_hz', 20.0)
 
+
+
         # --- Read params ---
         self.res = float(self.get_parameter('resolution').value)
         self.inflate = float(self.get_parameter('inflate_radius').value)
@@ -126,7 +128,16 @@ class CF3DExplorer(Node):
         hz = float(self.get_parameter('loop_rate_hz').value)
         self.timer = self.create_timer(1.0 / hz, self.control_step)
 
-        self.get_logger().info('CF3D Explorer initialised.')
+        self.get_logger().info('CF3D Explorer initialised.')   
+
+        # --- Stagnation / exploration helpers ---
+        self.hop_every = 5.0  # seconds
+        self.last_hop = self.get_clock().now()     
+
+        # Optional: long-hop feature 
+        self.last_p = self.p_map.copy() #seconds between long attempts
+        self.last_progress_check = self.get_clock().now()
+        self.stuck_for = 0.0
 
     # --------- Subscriptions ----------
     def on_markers(self, marr: MarkerArray):
@@ -208,6 +219,21 @@ class CF3DExplorer(Node):
         self.p_map = np.array([px, py, pz], dtype=np.float32)
         self.has_odom = True
 
+        
+    def occ_density_score(self, g, radius=0.6):
+        if self.occ is None: return 0.0
+        gi = self.world_to_idx(g)
+        if gi is None: return -1e9
+        r = max(1, int(radius / self.res))
+        nx, ny, nz = self.size
+        ix, iy, iz = gi
+        i0 = max(0, ix - r); i1 = min(nx - 1, ix + r)
+        j0 = max(0, iy - r); j1 = min(ny - 1, iy + r)
+        k0 = max(0, iz - r); k1 = min(nz - 1, iz + r)
+        # fewer occupied voxels nearby → higher score
+        occ_count = int(self.occ[i0:i1+1, j0:j1+1, k0:k1+1].sum())
+        return -occ_count  # negative so fewer → larger
+
     # --------- Helpers ----------
     def world_to_idx(self, xyz: np.ndarray) -> Optional[Tuple[int, int, int]]:
         if self.occ is None:
@@ -229,34 +255,37 @@ class CF3DExplorer(Node):
         return True
 
     def sample_goal_near(self) -> Optional[np.ndarray]:
-        # Bias vertical moves: 1/3 up, 1/3 down, 1/3 horizontal-ish
-        mode = random.choice(['up', 'down', 'mix'])
-        dx = random.uniform(-self.sr_xy, self.sr_xy)
-        dy = random.uniform(-self.sr_xy, self.sr_xy)
-        if mode == 'up':
-            dz = random.uniform(0.2, self.sr_z)
-        elif mode == 'down':
-            dz = -random.uniform(0.2, self.sr_z)
-        else:
-            dz = random.uniform(-self.sr_z, self.sr_z)
-
-        g = self.p_map + np.array([dx, dy, dz], dtype=np.float32)
-        g[2] = float(np.clip(g[2], self.z_min, self.z_max))
         if self.occ is None:
-            return g
-        # Prefer free target voxel with free line
-        if self.world_to_idx(g) is not None and self.is_free_line(self.p_map, g):
-            return g
-        # Try a handful more samples
-        for _ in range(15):
+            return self.p_map + np.array([
+                random.uniform(-self.sr_xy, self.sr_xy),
+                random.uniform(-self.sr_xy, self.sr_xy),
+                np.clip(self.p_map[2] + random.uniform(-self.sr_z, self.sr_z), self.z_min, self.z_max)
+            ], dtype=np.float32)
+
+        candidates = []
+        for _ in range(40):  # was ~15; try 40 to be choosier
             dx = random.uniform(-self.sr_xy, self.sr_xy)
             dy = random.uniform(-self.sr_xy, self.sr_xy)
             dz = random.uniform(-self.sr_z, self.sr_z)
-            gg = self.p_map + np.array([dx, dy, dz], dtype=np.float32)
-            gg[2] = float(np.clip(gg[2], self.z_min, self.z_max))
-            if self.world_to_idx(gg) is not None and self.is_free_line(self.p_map, gg):
-                return gg
-        return None
+            g = self.p_map + np.array([dx, dy, dz], dtype=np.float32)
+            g[2] = float(np.clip(g[2], self.z_min, self.z_max))
+            if self.world_to_idx(g) is not None and self.is_free_line(self.p_map, g):
+                candidates.append(g)
+
+        if not candidates:
+            return None
+
+        scores = []
+        for g in candidates:
+            # combine "go far" and "go sparse" (tune weights as you like)
+            far = np.linalg.norm(g - self.p_map)
+            sparse = self.occ_density_score(g, radius=0.8)
+            scores.append(1.0 * far + 0.5 * sparse)
+        return candidates[int(np.argmax(scores))]
+        # pick the farthest valid goal to push outward
+        dists = [np.linalg.norm(g - self.p_map) for g in candidates]
+        return candidates[int(np.argmax(dists))]
+
 
     def repulsion(self) -> np.ndarray:
         """Inverse-distance repulsion from occupied voxels within repulse_radius."""
@@ -291,6 +320,24 @@ class CF3DExplorer(Node):
 
     # --------- Control loop ----------
     def control_step(self):
+
+        now = self.get_clock().now()
+        dt = (now - self.last_progress_check).nanoseconds / 1e9
+        if dt > 2.0:
+            moved = float(np.linalg.norm(self.p_map - self.last_p))
+            if moved < 0.20:
+                self.stuck_for += dt
+                # temporarily widen search radii
+                self.sr_xy = min(self.sr_xy * 1.35, 6.0)
+                self.sr_z  = min(self.sr_z  * 1.35, 3.0)
+            else:
+                # shrink back toward defaults
+                self.sr_xy = max(self.sr_xy * 0.9, 1.5)
+                self.sr_z  = max(self.sr_z  * 0.9, 0.8)
+                self.stuck_for = 0.0
+            self.last_p = self.p_map.copy()
+            self.last_progress_check = now
+
         # Hover if no odom yet
         if not self.has_odom:
             self.cmd_pub.publish(Twist())
@@ -346,6 +393,7 @@ class CF3DExplorer(Node):
         # (leave yaw untouched; Crazyflie usually ignores angular if you fly in vel mode)
 
         self.cmd_pub.publish(cmd)
+
 
 
 def main():
