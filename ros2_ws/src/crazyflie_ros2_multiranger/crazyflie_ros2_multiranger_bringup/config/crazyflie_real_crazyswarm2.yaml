@@ -2,7 +2,7 @@
 robots:
   crazyflie_real:
     enabled: true
-    uri: radio://0/80/2M/E7E7E7E7E7
+    uri: udp://192.168.43.42:2390
     initial_position: [0.0, 0.0, 0.0]
     type: cf21  # see robot_types
 

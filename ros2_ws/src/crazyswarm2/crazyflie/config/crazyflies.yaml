@@ -1,10 +1,10 @@
 # named list of all robots
-fileversion: 3
+fileversion: 1
 
 robots:
   cf231:
     enabled: true
-    uri: radio://0/80/2M/E7E7E7E7E7
+    uri: udp://192.168.43.42:2390
     initial_position: [0.0, 0.0, 0.0]
     type: cf21  # see robot_types
     # firmware_params:
@@ -121,7 +121,8 @@ all:
       extQuatStdDev: 0.5e-1
     # kalman:
     #   resetEstimation: 1
-  # reference frame for on-board state-estimate of all drones (use robot_types/type_name to set per type, or
+  # reference frame for on-board s
+  tate-estimate of all drones (use robot_types/type_name to set per type, or
   # robots/drone_name to set per drone)
   reference_frame: "world"
   broadcasts:
