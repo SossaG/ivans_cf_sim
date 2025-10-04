@@ -400,9 +400,16 @@ class CrazyflieServer(Node):
         self.swarm._cfs[link_uri].logging[prefix +
                                           "_logging_freq"] = logging_freq
         self.swarm._cfs[link_uri].logging[prefix + "_log_config"] = lg
+        if prefix == "odom":
+            topic_name = self.cf_dict[link_uri] + "/odom_raw"
+        else:
+            topic_name = self.cf_dict[link_uri] + "/" + prefix
+
         if logging_enabled and global_logging_enabled:
             self.swarm._cfs[link_uri].logging[prefix + "_publisher"] = self.create_publisher(
-                topic_type, self.cf_dict[link_uri] + "/" + prefix, 10)
+                topic_type, topic_name, 10)
+
+
         else:
             self.swarm._cfs[link_uri].logging[prefix + "_publisher"] = "empty"
 
