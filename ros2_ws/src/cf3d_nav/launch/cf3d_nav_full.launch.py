@@ -22,7 +22,7 @@ def generate_launch_description():
             name='explorer3d',
             output='screen',
             parameters=[
-                {'cmd_vel_topic': '/crazyflie/cmd_vel'},
+                {'cmd_vel_topic': '/crazyflie/cmd_vel_dummy'},
                 {'odom_topic': '/crazyflie/odom'},
                 {'markers_topic': '/occupied_cells_vis_array'},
                 {'resolution': 0.05},
