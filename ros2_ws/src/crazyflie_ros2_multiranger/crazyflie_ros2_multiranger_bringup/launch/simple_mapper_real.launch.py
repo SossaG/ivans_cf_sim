@@ -35,7 +35,7 @@ def generate_launch_description():
             executable='vel_mux.py',
             name='vel_mux',
             output='screen',
-            parameters=[{'hover_height': 0.3},
+            parameters=[{'hover_height': 0.3}, #change 0.3 to ur own published /hover topic!!!! publish this in your explorer
                         {'incoming_twist_topic': '/cmd_vel'},
                         {'robot_prefix': 'crazyflie_real'},]
         )

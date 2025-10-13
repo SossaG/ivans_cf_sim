@@ -131,7 +131,7 @@ class WallFollowingMultiranger(Node):
         time_now = self.get_clock().now().nanoseconds * 1e-9
 
         # get velocity commands and current state from wall following state machine
-        if side_range > 0.1:
+        if side_range > 0.3:
             velocity_x, velocity_y, yaw_rate, state_wf = self.wall_following.wall_follower(
                 front_range, side_range, actual_yaw_rad, wf_dir, time_now)
 
