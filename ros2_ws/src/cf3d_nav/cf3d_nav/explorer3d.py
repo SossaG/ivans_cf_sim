@@ -10,12 +10,13 @@ from geometry_msgs.msg import Twist, Point
 from nav_msgs.msg import Odometry
 from visualization_msgs.msg import MarkerArray, Marker
 from tf_transformations import euler_from_quaternion
+from std_msgs.msg import Float32
+from sensor_msgs.msg import Range
 import tf2_ros
 import tf2_geometry_msgs  # noqa: F401 (keeps tf2 buffer happy)
 
 
 def bresenham3d(p0i, p1i):
-    """Integer 3D Bresenham line from p0i (i,j,k) to p1i (i,j,k)."""
     (x0, y0, z0) = map(int, p0i)
     (x1, y1, z1) = map(int, p1i)
     dx = abs(x1 - x0); dy = abs(y1 - y0); dz = abs(z1 - z0)
@@ -54,38 +55,58 @@ def bresenham3d(p0i, p1i):
 
 class CF3DExplorer(Node):
     """
-    Minimal 3D explorer:
+    Minimal 3D explorer with height setpoint output:
       - Rebuilds a local voxel occupancy from /occupied_cells_vis_array
       - Chooses short-range random 3D goals that pass a straight-line free check
       - Applies simple repulsive 'nudge' from nearby occupied voxels
-      - Publishes /crazyflie/cmd_vel Twist until goal reached, then resamples
+      - Publishes /cmd_vel (x,y only) and /cmd_height (Float32) for z control
     """
 
     def __init__(self):
         super().__init__('cf3d_explorer3d')
 
-        # --- Params you’ll likely tune ---
-        self.declare_parameter('cmd_vel_topic', '/crazyflie/cmd_vel')
-        self.declare_parameter('odom_topic', '/crazyflie/odom')
+        # --- New frames you asked for ---
+        self.declare_parameter('world_frame_id', 'world')         # publish/compute in this frame
+        self.declare_parameter('body_frame_id', 'crazyflie_real') # body frame id (reserved for future use/logging)
+
+        # --- Existing params (kept) ---
+        self.declare_parameter('cmd_vel_topic', '/cmd_vel')
+        self.declare_parameter('odom_topic', '/crazyflie_real/odom')
         self.declare_parameter('markers_topic', '/occupied_cells_vis_array')
-        self.declare_parameter('frame_id', 'map')   # marker frame
-        self.declare_parameter('odom_frame', 'odom')
+
+        # For marker & TF alignment: default both to world so no TF is needed
+        self.declare_parameter('frame_id', 'world')   # marker frame
+        self.declare_parameter('odom_frame', 'world')
+
         self.declare_parameter('resolution', 0.05)  # must match your octomap resolution
-        self.declare_parameter('inflate_radius', 0.0)  # must match voxelizer inflate
-        self.declare_parameter('goal_radius', 0.25)  # when within this, resample goal
-        self.declare_parameter('cruise_speed', 0.5)  # m/s cap
-        self.declare_parameter('kp', 0.8)            # proportional gain to goal
-        self.declare_parameter('sample_radius_xy', 3.0)  # local goal sampling box
-        self.declare_parameter('sample_radius_z', 1.5)
-        self.declare_parameter('z_min', 0.10)        # keep above floor
-        self.declare_parameter('z_max', 2.50)        # keep below "ceiling"
-        self.declare_parameter('repulse_radius', 0.05)   # m (within this, push away)
-        self.declare_parameter('repulse_gain', 0.3)      # weight of repulsion
+        self.declare_parameter('inflate_radius', 0.3)  # must match voxelizer inflate
+        self.declare_parameter('goal_radius', 0.15)  # when within this, resample goal
+        self.declare_parameter('cruise_speed', 0.1)  # m/s cap
+        self.declare_parameter('kp', 0.35)            # proportional gain to goal
+        self.declare_parameter('sample_radius_xy', 0.8)
+        self.declare_parameter('sample_radius_z', 0.3)
+        self.declare_parameter('z_min', 0.10)        # used for goal sampling bounds
+        self.declare_parameter('z_max', 2.50)
+        self.declare_parameter('repulse_radius', 0.2)
+        self.declare_parameter('repulse_gain', 1.25)
         self.declare_parameter('loop_rate_hz', 20.0)
 
+        # --- Height/clearance + range topics ---
+        self.declare_parameter('height_cmd_topic', '/cmd_height')
+        self.declare_parameter('range_down_topic', '/range/down')
+        self.declare_parameter('range_up_topic', '/range/up')
+        self.declare_parameter('clearance_floor_m', 0.20)   # >= 20 cm from floor
+        self.declare_parameter('clearance_ceiling_m', 0.20) # >= 20 cm from ceiling
 
+        # Manual band used when ranges are missing: [0.20, 1.50] m
+        self.declare_parameter('abs_min_height_m', 0.20)
+        self.declare_parameter('abs_max_height_m', 1.50)
+        self.declare_parameter('range_fresh_timeout_s', 0.6)
 
         # --- Read params ---
+        self.world_frame = self.get_parameter('world_frame_id').get_parameter_value().string_value
+        self.body_frame  = self.get_parameter('body_frame_id').get_parameter_value().string_value
+
         self.res = float(self.get_parameter('resolution').value)
         self.inflate = float(self.get_parameter('inflate_radius').value)
         self.goal_r = float(self.get_parameter('goal_radius').value)
@@ -98,50 +119,76 @@ class CF3DExplorer(Node):
         self.rep_r = float(self.get_parameter('repulse_radius').value)
         self.rep_k = float(self.get_parameter('repulse_gain').value)
 
+        # Align marker/odom frames with your world frame by default
         self.frame_id = self.get_parameter('frame_id').get_parameter_value().string_value
         self.odom_frame = self.get_parameter('odom_frame').get_parameter_value().string_value
+        if not self.frame_id:
+            self.frame_id = self.world_frame
+        if not self.odom_frame:
+            self.odom_frame = self.world_frame
+
         markers_topic = self.get_parameter('markers_topic').get_parameter_value().string_value
         odom_topic = self.get_parameter('odom_topic').get_parameter_value().string_value
         cmd_vel_topic = self.get_parameter('cmd_vel_topic').get_parameter_value().string_value
 
+        height_cmd_topic = self.get_parameter('height_cmd_topic').get_parameter_value().string_value
+        range_down_topic = self.get_parameter('range_down_topic').get_parameter_value().string_value
+        range_up_topic = self.get_parameter('range_up_topic').get_parameter_value().string_value
+        self.clear_floor = float(self.get_parameter('clearance_floor_m').value)
+        self.clear_ceil = float(self.get_parameter('clearance_ceiling_m').value)
+        self.abs_min_h = float(self.get_parameter('abs_min_height_m').value)
+        self.abs_max_h = float(self.get_parameter('abs_max_height_m').value)
+        self.range_timeout = float(self.get_parameter('range_fresh_timeout_s').value)
+
         # --- IO ---
         self.cmd_pub = self.create_publisher(Twist, cmd_vel_topic, 10)
+        self.height_pub = self.create_publisher(Float32, height_cmd_topic, 10)
         self.sub_markers = self.create_subscription(MarkerArray, markers_topic, self.on_markers, 10)
         self.sub_odom = self.create_subscription(Odometry, odom_topic, self.on_odom, 10)
+        # NEW: range subscribers (optional)
+        self.sub_range_down = self.create_subscription(Range, range_down_topic, self.on_range_down, 10)
+        self.sub_range_up = self.create_subscription(Range, range_up_topic, self.on_range_up, 10)
 
         # --- TF buffer (optional map->odom) ---
         self.tf_buffer = tf2_ros.Buffer(cache_time=Duration(seconds=10.0))
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         # --- Grid state ---
-        self.occ = None            # np.ndarray [nx,ny,nz], uint8
-        self.origin = None         # np.array([x0,y0,z0])
-        self.size = None           # (nx,ny,nz)
+        self.occ = None
+        self.origin = None
+        self.size = None
         self.last_grid_stamp = self.get_clock().now()
 
         # --- Robot state / goal ---
-        self.p_map = np.array([0.0, 0.0, 0.3], dtype=np.float32)  # position in map frame
+        self.p_map = np.array([0.0, 0.0, 0.3], dtype=np.float32)
         self.has_odom = False
         self.goal: Optional[np.ndarray] = None
+
+        # Height state
+        self.last_down = None
+        self.last_up = None
+        self.last_down_stamp = None
+        self.last_up_stamp = None
+        self.h_sp = float(self.p_map[2])  # commanded height setpoint
 
         # Main control loop
         hz = float(self.get_parameter('loop_rate_hz').value)
         self.timer = self.create_timer(1.0 / hz, self.control_step)
 
-        self.get_logger().info('CF3D Explorer initialised.')   
+        self.get_logger().info(
+            f'CF3D Explorer initialised with /cmd_height output. world_frame={self.world_frame}, '
+            f'body_frame={self.body_frame}, marker_frame={self.frame_id}, odom_frame={self.odom_frame}'
+        )
 
         # --- Stagnation / exploration helpers ---
         self.hop_every = 5.0  # seconds
-        self.last_hop = self.get_clock().now()     
-
-        # Optional: long-hop feature 
-        self.last_p = self.p_map.copy() #seconds between long attempts
+        self.last_hop = self.get_clock().now()
+        self.last_p = self.p_map.copy()
         self.last_progress_check = self.get_clock().now()
         self.stuck_for = 0.0
 
     # --------- Subscriptions ----------
     def on_markers(self, marr: MarkerArray):
-        # Build (or rebuild) occupancy grid from CUBE_LIST markers
         pts = []
         res_from_markers = None
         for m in marr.markers:
@@ -154,7 +201,6 @@ class CF3DExplorer(Node):
             return
 
         P = np.array(pts, dtype=np.float32)
-        # Allow following Octomap’s true resolution if present
         res = res_from_markers if res_from_markers else self.res
 
         inflate = max(self.inflate, 0.0)
@@ -171,7 +217,6 @@ class CF3DExplorer(Node):
 
         base_ids = np.unique(w2g(P), axis=0)
 
-        # Inflate obstacles by radius (in voxels)
         r = max(0, int(math.ceil(inflate / res)))
         if r > 0:
             off = np.array([(i, j, k)
@@ -186,40 +231,44 @@ class CF3DExplorer(Node):
         else:
             occ[base_ids[:, 0], base_ids[:, 1], base_ids[:, 2]] = 1
 
-        # Commit
         self.occ = occ
         self.origin = origin
         self.size = (nx, ny, nz)
-        self.res = res  # keep in sync if discovered
+        self.res = res
         self.last_grid_stamp = self.get_clock().now()
 
     def on_odom(self, od: Odometry):
-        # Transform odom pose into map frame if needed
+        # Read odom pose in odom_frame, transform to world_frame if needed
         px = od.pose.pose.position.x
         py = od.pose.pose.position.y
         pz = od.pose.pose.position.z
 
         q = od.pose.pose.orientation
-        _ = euler_from_quaternion([q.x, q.y, q.z, q.w])  # yaw unused, but handy if you add heading
+        _ = euler_from_quaternion([q.x, q.y, q.z, q.w])
 
-        # Is odom frame different to map? If yes, try transform.
-        if self.odom_frame != self.frame_id:
+        # If odometry isn't already in the world frame, transform by TF
+        if self.odom_frame != self.world_frame:
             try:
                 tf = self.tf_buffer.lookup_transform(
-                    self.frame_id, self.odom_frame, rclpy.time.Time())
+                    self.world_frame, self.odom_frame, rclpy.time.Time())
                 tx = tf.transform.translation
-                rx = tf.transform.rotation
-                # Only apply translation (ignore rotation for simplicity in this minimal example)
                 px = px + tx.x
                 py = py + tx.y
                 pz = pz + tx.z
             except Exception:
-                pass  # if TF missing, we’ll assume frames roughly aligned
+                pass
 
         self.p_map = np.array([px, py, pz], dtype=np.float32)
         self.has_odom = True
 
-        
+    def on_range_down(self, msg: Range):
+        self.last_down = float(msg.range)
+        self.last_down_stamp = self.get_clock().now()
+
+    def on_range_up(self, msg: Range):
+        self.last_up = float(msg.range)
+        self.last_up_stamp = self.get_clock().now()
+
     def occ_density_score(self, g, radius=0.6):
         if self.occ is None: return 0.0
         gi = self.world_to_idx(g)
@@ -230,9 +279,8 @@ class CF3DExplorer(Node):
         i0 = max(0, ix - r); i1 = min(nx - 1, ix + r)
         j0 = max(0, iy - r); j1 = min(ny - 1, iy + r)
         k0 = max(0, iz - r); k1 = min(nz - 1, iz + r)
-        # fewer occupied voxels nearby → higher score
         occ_count = int(self.occ[i0:i1+1, j0:j1+1, k0:k1+1].sum())
-        return -occ_count  # negative so fewer → larger
+        return -occ_count
 
     # --------- Helpers ----------
     def world_to_idx(self, xyz: np.ndarray) -> Optional[Tuple[int, int, int]]:
@@ -255,6 +303,7 @@ class CF3DExplorer(Node):
         return True
 
     def sample_goal_near(self) -> Optional[np.ndarray]:
+        # When no map yet, sample around current pose within (sr_xy, sr_z)
         if self.occ is None:
             return self.p_map + np.array([
                 random.uniform(-self.sr_xy, self.sr_xy),
@@ -263,7 +312,7 @@ class CF3DExplorer(Node):
             ], dtype=np.float32)
 
         candidates = []
-        for _ in range(40):  # was ~15; try 40 to be choosier
+        for _ in range(40):
             dx = random.uniform(-self.sr_xy, self.sr_xy)
             dy = random.uniform(-self.sr_xy, self.sr_xy)
             dz = random.uniform(-self.sr_z, self.sr_z)
@@ -277,18 +326,12 @@ class CF3DExplorer(Node):
 
         scores = []
         for g in candidates:
-            # combine "go far" and "go sparse" (tune weights as you like)
             far = np.linalg.norm(g - self.p_map)
             sparse = self.occ_density_score(g, radius=0.8)
             scores.append(1.0 * far + 0.5 * sparse)
         return candidates[int(np.argmax(scores))]
-        # pick the farthest valid goal to push outward
-        dists = [np.linalg.norm(g - self.p_map) for g in candidates]
-        return candidates[int(np.argmax(dists))]
-
 
     def repulsion(self) -> np.ndarray:
-        """Inverse-distance repulsion from occupied voxels within repulse_radius."""
         if self.occ is None:
             return np.zeros(3, dtype=np.float32)
         idx = self.world_to_idx(self.p_map)
@@ -315,8 +358,14 @@ class CF3DExplorer(Node):
                     d = np.array([self.p_map[0] - x, self.p_map[1] - y, self.p_map[2] - z], dtype=np.float32)
                     dist = np.linalg.norm(d) + 1e-6
                     if dist <= self.rep_r:
-                        acc += (d / (dist * dist))  # 1/r^2 push
+                        acc += (d / (dist * dist))
         return acc
+
+    def _range_is_fresh(self, stamp):
+        if stamp is None:
+            return False
+        age = (self.get_clock().now() - stamp).nanoseconds / 1e9
+        return age <= self.range_timeout
 
     # --------- Control loop ----------
     def control_step(self):
@@ -327,11 +376,9 @@ class CF3DExplorer(Node):
             moved = float(np.linalg.norm(self.p_map - self.last_p))
             if moved < 0.20:
                 self.stuck_for += dt
-                # temporarily widen search radii
                 self.sr_xy = min(self.sr_xy * 1.35, 6.0)
                 self.sr_z  = min(self.sr_z  * 1.35, 3.0)
             else:
-                # shrink back toward defaults
                 self.sr_xy = max(self.sr_xy * 0.9, 1.5)
                 self.sr_z  = max(self.sr_z  * 0.9, 0.8)
                 self.stuck_for = 0.0
@@ -341,17 +388,14 @@ class CF3DExplorer(Node):
         # Hover if no odom yet
         if not self.has_odom:
             self.cmd_pub.publish(Twist())
+            self.height_pub.publish(Float32(data=self.h_sp))
             return
 
         # Refresh / resample goal if needed
         if self.goal is None or self.occ is None:
             self.goal = self.sample_goal_near()
 
-        if self.goal is None:
-            # No valid goal found → gently ascend a little to escape
-            targ = self.p_map + np.array([0.0, 0.0, 0.3], dtype=np.float32)
-        else:
-            targ = self.goal
+        targ = self.goal if self.goal is not None else (self.p_map + np.array([0.0, 0.0, 0.3], dtype=np.float32))
 
         # Recheck straight line; if blocked, resample
         if self.occ is not None and not self.is_free_line(self.p_map, targ):
@@ -360,40 +404,77 @@ class CF3DExplorer(Node):
                 targ = self.goal
 
         # Goal reached?
-        if np.linalg.norm(targ - self.p_map) < self.goal_r:
+        if self.goal is not None and np.linalg.norm(self.goal - self.p_map) < self.goal_r:
             self.goal = self.sample_goal_near()
 
-        # Compute command
-        cmd = Twist()
-
-        # Attractive velocity to goal
+        # Attractive velocity to goal (x,y only)
         if self.goal is not None:
             v_des = (self.goal - self.p_map) * self.kp
         else:
             v_des = np.zeros(3, dtype=np.float32)
 
-        # Add repulsion from nearby voxels
         v_rep = self.repulsion() * self.rep_k
         v = v_des + v_rep
 
-        # Limit Z to stay within bounds
-        if self.p_map[2] < self.z_min + 0.05:
-            v[2] += 0.3
-        if self.p_map[2] > self.z_max - 0.05:
-            v[2] -= 0.3
+        # --- Height logic ---
+        have_down = self._range_is_fresh(self.last_down_stamp)
+        have_up = self._range_is_fresh(self.last_up_stamp)
 
-        # Clip speed
-        speed = np.linalg.norm(v)
-        if speed > 1e-3:
-            v = v * (min(self.vmax, speed) / speed)
+        # Default desire: follow goal's z (goal/targ Z starts from odom-based sampling)
+        desired_h = float(targ[2])
+        out_of_bounds = False
 
+        if have_down and have_up:
+            # Enforce ≥ clearances relative to floor and ceiling
+            if self.last_down is not None and self.last_down < (self.clear_floor - 0.02):
+                # too close to floor → climb
+                self.h_sp = float(self.p_map[2] + (self.clear_floor - self.last_down) + 0.05)
+                out_of_bounds = True
+            elif self.last_up is not None and self.last_up < (self.clear_ceil - 0.02):
+                # too close to ceiling → descend
+                self.h_sp = float(self.p_map[2] - (self.clear_ceil - self.last_up) - 0.05)
+                out_of_bounds = True
+            else:
+                # within safe clearances: track desired goal z
+                self.h_sp = desired_h
+        else:
+            # No reliable ranges → use odom Z with manual band clamp [abs_min_h, abs_max_h]
+            # Keep exploring in Z (desired_h comes from sampled goal), but always clamp commands.
+            if self.p_map[2] < self.abs_min_h - 1e-3:
+                self.h_sp = self.abs_min_h
+                out_of_bounds = True
+            elif self.p_map[2] > self.abs_max_h + 1e-3:
+                self.h_sp = self.abs_max_h
+                out_of_bounds = True
+            else:
+                # Inside band: track clamped goal height
+                self.h_sp = float(np.clip(desired_h, self.abs_min_h, self.abs_max_h))
+
+            # Nudge any sampled goal/targ Z back into band so planner doesn't fight clamps
+            if self.goal is not None:
+                self.goal[2] = float(np.clip(self.goal[2], self.abs_min_h, self.abs_max_h))
+            targ[2] = float(np.clip(targ[2], self.abs_min_h, self.abs_max_h))
+
+        # If we are out of bounds, pause x,y exploration to prioritise height recovery
+        if out_of_bounds:
+            v[0] = 0.0
+            v[1] = 0.0
+
+        # Clip x,y speed only (z is handled by height controller)
+        v[2] = 0.0
+        xy_speed = math.hypot(v[0], v[1])
+        if xy_speed > 1e-3:
+            scale = min(self.vmax, xy_speed) / xy_speed
+            v[0] *= scale
+            v[1] *= scale
+
+        cmd = Twist()
         cmd.linear.x = float(v[0])
         cmd.linear.y = float(v[1])
-        cmd.linear.z = float(v[2])
-        # (leave yaw untouched; Crazyflie usually ignores angular if you fly in vel mode)
+        cmd.linear.z = 0.0  # z control moved to /cmd_height
 
         self.cmd_pub.publish(cmd)
-
+        self.height_pub.publish(Float32(data=self.h_sp))
 
 
 def main():
@@ -406,4 +487,3 @@ def main():
 
 if __name__ == '__main__':
     main()
- 

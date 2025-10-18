@@ -15,6 +15,7 @@ from geometry_msgs.msg import Twist
 from crazyflie_interfaces.srv import Takeoff, Land, NotifySetpointsStop
 from crazyflie_interfaces.msg import Hover
 import time
+from std_msgs.msg import Float32
 
 class VelMux(Node):
     def __init__(self):
@@ -22,6 +23,7 @@ class VelMux(Node):
         self.declare_parameter('hover_height', 0.5)
         self.declare_parameter('robot_prefix', '/cf')
         self.declare_parameter('incoming_twist_topic', '/cmd_vel')
+        
 
         self.hover_height  = self.get_parameter('hover_height').value
         robot_prefix  = self.get_parameter('robot_prefix').value
@@ -47,6 +49,16 @@ class VelMux(Node):
 
         self.get_logger().info(f"Velocity Multiplexer set for {robot_prefix}"+
                                f" with height {self.hover_height} m using the {incoming_twist_topic} topic")
+        self.height_sub = self.create_subscription(
+            Float32,
+            '/cmd_height',
+            self.cmd_height_callback,
+            10
+        )
+        self.cmd_height_value = self.hover_height
+    
+    def cmd_height_callback(self, msg):
+        self.cmd_height_value = msg.data
 
     def cmd_vel_callback(self, msg):
         self.msg_cmd_vel = msg
@@ -59,7 +71,7 @@ class VelMux(Node):
     def timer_callback(self):
         if self.received_first_cmd_vel and self.cf_has_taken_off is False:
             req = Takeoff.Request()
-            req.height = self.hover_height
+            req.height = self.cmd_height_value
             req.duration = rclpy.duration.Duration(seconds=2.0).to_msg()
             self.takeoff_client.call_async(req)
             self.cf_has_taken_off = True
@@ -70,7 +82,7 @@ class VelMux(Node):
                 msg.vx = self.msg_cmd_vel.linear.x
                 msg.vy = self.msg_cmd_vel.linear.y
                 msg.yaw_rate = self.msg_cmd_vel.angular.z
-                msg.z_distance = self.hover_height
+                msg.z_distance = self.cmd_height_value
                 self.publisher_hover.publish(msg)
             else:
                 req = NotifySetpointsStop.Request()

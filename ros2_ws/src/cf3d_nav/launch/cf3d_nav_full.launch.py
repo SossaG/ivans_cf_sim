@@ -15,20 +15,15 @@ def generate_launch_description():
         )
     )
     voxelizer = Node(package='cf3d_nav', executable='cf3d_voxelizer', name='cf3d_voxelizer',
-                     parameters=[{'resolution': 0.10, 'inflate_radius': 0.20, 'frame_id':'map'}])
+                     parameters=[{'resolution': 0.10, 'inflate_radius': 0.05, 'frame_id':'world'}])
 
     explore3d = Node(package='cf3d_nav',
             executable='explorer3d',
             name='explorer3d',
             output='screen',
             parameters=[
-                {'cmd_vel_topic': '/crazyflie/cmd_vel_dummy'},
-                {'odom_topic': '/crazyflie/odom'},
+                {'cmd_vel_topic': '/cmd_vel'},
+                {'odom_topic': '/crazyflie_real/odom'},
                 {'markers_topic': '/occupied_cells_vis_array'},
-                {'resolution': 0.05},
-                {'inflate_radius': 0.050},
-                {'z_min': 0.10},
-                {'z_max': 2.50},
-                {'cruise_speed': 0.5},
             ],)
     return LaunchDescription([octo, voxelizer, explore3d    ])
