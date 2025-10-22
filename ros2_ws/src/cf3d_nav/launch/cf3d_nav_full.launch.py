@@ -14,16 +14,15 @@ def generate_launch_description():
             os.path.join(get_package_share_directory('cf3d_nav'), 'launch', 'octomap_mapping.launch.py')
         )
     )
-    voxelizer = Node(package='cf3d_nav', executable='cf3d_voxelizer', name='cf3d_voxelizer',
-                     parameters=[{'resolution': 0.10, 'inflate_radius': 0.05, 'frame_id':'world'}])
+
 
     explore3d = Node(package='cf3d_nav',
             executable='explorer3d',
             name='explorer3d',
             output='screen',
             parameters=[
-                {'cmd_vel_topic': '/cmd_vel'},
+                {'cmd_vel_topic': '/auto_cmd_vel'},
                 {'odom_topic': '/crazyflie_real/odom'},
                 {'markers_topic': '/occupied_cells_vis_array'},
             ],)
-    return LaunchDescription([octo, voxelizer, explore3d    ])
+    return LaunchDescription([octo, explore3d])
