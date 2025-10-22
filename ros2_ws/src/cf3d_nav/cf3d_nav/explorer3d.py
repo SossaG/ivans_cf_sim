@@ -89,10 +89,10 @@ class CF3DExplorer(Node):
         self.declare_parameter('z_max', 2.50)
         self.declare_parameter('repulse_radius', 0.2)
         self.declare_parameter('repulse_gain', 1.25)
-        self.declare_parameter('loop_rate_hz', 20.0)
+        self.declare_parameter('loop_rate_hz', 30.0) # to satisfy GS5 subsystem requirement in final report!!!!
 
         # --- Height/clearance + range topics ---
-        self.declare_parameter('height_cmd_topic', '/cmd_height')
+        self.declare_parameter('height_cmd_topic', '/auto_cmd_height')
         self.declare_parameter('range_down_topic', '/range/down')
         self.declare_parameter('range_up_topic', '/range/up')
         self.declare_parameter('clearance_floor_m', 0.20)   # >= 20 cm from floor
@@ -100,7 +100,7 @@ class CF3DExplorer(Node):
 
         # Manual band used when ranges are missing: [0.20, 1.50] m
         self.declare_parameter('abs_min_height_m', 0.20)
-        self.declare_parameter('abs_max_height_m', 1.50)
+        self.declare_parameter('abs_max_height_m', 0.5)
         self.declare_parameter('range_fresh_timeout_s', 0.6)
 
         # --- Read params ---
