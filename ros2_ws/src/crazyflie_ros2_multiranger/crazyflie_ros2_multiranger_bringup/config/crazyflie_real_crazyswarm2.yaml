@@ -28,6 +28,8 @@ all:
         frequency: 10 # Hz
       scan:
         frequency: 10 # Hz
+      vertscan: 
+        frequency: 5 #Hz
   firmware_params:
     stabilizer:
       estimator: 2 # 1: complementary, 2: kalman

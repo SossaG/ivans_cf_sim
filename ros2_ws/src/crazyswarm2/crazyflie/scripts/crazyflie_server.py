@@ -92,11 +92,13 @@ class CrazyflieServer(Node):
         # Assign default topic types, variables and callbacks
         self.default_log_type = {"pose": PoseStamped,
                                  "scan": LaserScan,
+                                 "vertscan": LaserScan,
                                  "odom": Odometry,
                                  "status": Status}
         self.default_log_vars = {"pose": ['stateEstimate.x', 'stateEstimate.y', 'stateEstimate.z',
                                           'stabilizer.roll', 'stabilizer.pitch', 'stabilizer.yaw'],
-                                 "scan": ['range.front', 'range.left', 'range.back', 'range.right'],
+                                 "scan": ['range.front', 'range.left', 'range.back', 'range.right'], # @@ ADDED 'range.up','range.zrange' 
+                                 "vertscan": ['range.up','range.zrange'],
                                  "odom": ['stateEstimate.x', 'stateEstimate.y', 'stateEstimate.z',
                                           'stabilizer.yaw', 'stabilizer.roll', 'stabilizer.pitch',
                                           'kalman.statePX', 'kalman.statePY', 'kalman.statePZ',
@@ -105,6 +107,7 @@ class CrazyflieServer(Node):
                                           'radio.rssi']}
         self.default_log_fnc = {"pose": self._log_pose_data_callback,
                                 "scan": self._log_scan_data_callback,
+                                "vertscan": self._log_vertscan_data_callback,
                                 "odom": self._log_odom_data_callback,
                                 "status": self._log_status_data_callback}
 
@@ -162,9 +165,9 @@ class CrazyflieServer(Node):
             # link statistics from CFlib
             self.swarm._cfs[link_uri].status = {}
             self.swarm._cfs[link_uri].status["latency"] = 0.0
-            #Sself.swarm._cfs[link_uri].cf.link_statistics.latency_updated.add_callback(partial(self._latency_callback, uri=link_uri))
+            #self.swarm._cfs[link_uri].cf.link_statistics.latency_updated.add_callback(partial(self._latency_callback, uri=link_uri))
             self.swarm._cfs[link_uri].status["num_rx_unicast"] = 0.0
-            #Sself.swarm._cfs[link_uri].cf.link_statistics.uplink_rate_updated.add_callback(partial(self._uplink_rate_callback, uri=link_uri))
+            #self.swarm._cfs[link_uri].cf.link_statistics.uplink_rate_updated.add_callback(partial(self._uplink_rate_callback, uri=link_uri))
             self.swarm._cfs[link_uri].status["num_tx_unicast"] = 0.0
             #self.swarm._cfs[link_uri].cf.link_statistics.downlink_rate_updated.add_callback(partial(self._downlink_rate_callback, uri=link_uri))
 
@@ -559,6 +562,33 @@ class CrazyflieServer(Node):
             self.get_logger().error(
                 f'[{self.cf_dict[link_uri]}] Could not add log config, bad configuration.')
 
+    def _log_vertscan_data_callback(self,timestamp, data, logconf, uri):
+        cf_name = self.cf_dict[uri]
+        max_range = 3.49
+        up_range = float(data.get('range.up'))/1000.0 # @@ ADDED
+        down_range = float(data.get('range.zrange'))/1000.0 # @@ ADDED
+
+        if up_range > max_range: # @@ ADDED
+            up_range = float("inf")
+        if down_range > max_range: # @@ ADDED
+            down_range = float("inf")
+        self.ranges = [up_range, down_range] # @@ ADDED      , up_range, down_range
+
+        msg = LaserScan()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = cf_name
+        msg.range_min = 0.01
+        msg.range_max = 3.49
+        msg.ranges = self.ranges
+        msg.angle_min = -0.5 * 2 * pi
+        msg.angle_max = 0.25 * 2 * pi
+        msg.angle_increment = 1.0 * pi # @@ 180 degrees between up and down
+        try:
+            self.swarm._cfs[uri].logging["vertscan_publisher"].publish(msg)
+        except:
+            self.get_logger().info("Could not publish vertscan message, stopping vertscan log")
+            self.swarm._cfs[uri].logging["vertscan_log_config"].stop()
+
     def _log_scan_data_callback(self, timestamp, data, logconf, uri):
         """
         Once multiranger range is retrieved from the Crazyflie,
@@ -578,6 +608,7 @@ class CrazyflieServer(Node):
             right_range = float("inf")
         if back_range > max_range:
             back_range = float("inf")
+
         self.ranges = [back_range, right_range, front_range, left_range]
 
         msg = LaserScan()
