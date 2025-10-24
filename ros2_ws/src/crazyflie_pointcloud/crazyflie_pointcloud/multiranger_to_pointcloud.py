@@ -54,7 +54,7 @@ class MultiRangerPointCloudNode(Node):
         # --- Parameters ---
         self.declare_parameter('scan_topic', '/crazyflie/scan')
         self.declare_parameter('odom_topic', '/crazyflie/odom')
-        self.declare_parameter('vertscan_topic', '/vertscan')
+        self.declare_parameter('vertscan_topic', 'crazyflie_real/vertscan')
         self.declare_parameter('output_cloud_topic', '/crazyflie/pointcloud')
         self.declare_parameter('world_frame_id', 'crazyflie/odom')
         self.declare_parameter('voxel_size', 0.05)
