@@ -4,7 +4,6 @@ from typing import Optional
 
 import rclpy
 from rclpy.node import Node
-from rclpy.time import Time
 
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Float32, Int32
@@ -19,25 +18,25 @@ class GCVelMux(Node):
         self.declare_parameter('manual_topic', '/manual_cmd_vel')
         self.declare_parameter('auto_topic', '/auto_cmd_vel')
         self.declare_parameter('output_topic', '/cmd_vel')
-        self.declare_parameter('manual_timeout', 3.0)        # seconds without manual before fallback
-        self.declare_parameter('publish_rate', 30.0)         # Hz
 
+        # Kept for launch compatibility, but no longer used (timeout logic removed).
+        self.declare_parameter('manual_timeout', 3.0)
+
+        self.declare_parameter('publish_rate', 30.0)
         self.declare_parameter('odom_topic', '/crazyflie_real/odom')
 
-        # Height topics: make the mux the ONLY publisher on cmd_height_out
-        self.declare_parameter('auto_cmd_height_topic', '/auto_cmd_height')  # explorer should publish here (remap)
-        self.declare_parameter('cmd_height_out', '/cmd_height')              # final height topic (published by mux only)
+        # Height topics
+        self.declare_parameter('auto_cmd_height_topic', '/auto_cmd_height')
+        self.declare_parameter('cmd_height_out', '/cmd_height')
 
-        # Height control
-        self.declare_parameter('height_direc_topic', '/height_direc')  # Int32: 2=UP,1=NEUTRAL,0=DOWN
-        self.declare_parameter('height_offset', 0.02)                  # meters magnitude
+        self.declare_parameter('height_direc_topic', '/height_direc')  # Int32: 2=UP,1=HOLD,0=DOWN
+        self.declare_parameter('height_offset', 0.02)                   # meters
         self.declare_parameter('min_height', 0.0)
         self.declare_parameter('max_height', 0.0)
 
         manual_topic = self.get_parameter('manual_topic').value
         auto_topic = self.get_parameter('auto_topic').value
         output_topic = self.get_parameter('output_topic').value
-        self.manual_timeout = float(self.get_parameter('manual_timeout').value)
         publish_rate = float(self.get_parameter('publish_rate').value)
 
         odom_topic = self.get_parameter('odom_topic').value
@@ -52,12 +51,14 @@ class GCVelMux(Node):
         # ---------- State ----------
         self.last_manual: Twist = Twist()
         self.last_auto: Twist = Twist()
-        self.last_manual_time: Optional[Time] = None
-        self.last_auto_time: Optional[Time] = None
 
         self.last_odom_z: Optional[float] = None
-        self.height_state: int = 1  # 2=UP, 1=NEUTRAL, 0=DOWN (default neutral)
-        self.last_auto_height: Optional[float] = None  # latest auto height from explorer
+        self.height_state: int = 1  # 2=UP, 1=HOLD, 0=DOWN
+        self.last_auto_height: Optional[float] = None
+
+        # Per-tick activity flags (set by callbacks, cleared each timer tick)
+        self._manual_seen_this_tick: bool = False
+        self._heightdir_seen_this_tick: bool = False
 
         # ---------- IO ----------
         self.sub_manual = self.create_subscription(Twist, manual_topic, self._on_manual, 10)
@@ -78,18 +79,17 @@ class GCVelMux(Node):
             f"  manual='{manual_topic}', auto='{auto_topic}', out='{output_topic}'\n"
             f"  odom='{odom_topic}', height_in(auto)='{auto_h_in}', height_out='{cmd_h_out}'\n"
             f"  height_direc='{height_direc_topic}', offset={self.height_offset} m\n"
-            f"  manual_timeout={self.manual_timeout}s, rate={publish_rate}Hz\n"
+            f"  TIMEOUTS DISABLED: selection is per-tick activity based.\n"
             f"  clamp: min={self.min_height}, max={self.max_height} (disabled if max<=min)"
         )
 
     # ---------- Callbacks ----------
     def _on_manual(self, msg: Twist):
         self.last_manual = msg
-        self.last_manual_time = self.get_clock().now()
+        self._manual_seen_this_tick = True  # indicates manual is actively publishing this cycle
 
     def _on_auto(self, msg: Twist):
-        self.last_auto = msg
-        self.last_auto_time = self.get_clock().now()
+        self.last_auto = msg  # always keep the freshest auto cmd
 
     def _on_odom(self, msg: Odometry):
         try:
@@ -103,19 +103,14 @@ class GCVelMux(Node):
             self.get_logger().warn(f"Invalid /height_direc={val}; expected 0/1/2. Ignoring.")
             return
         if val != self.height_state:
-            self.get_logger().info({0: "height: DOWN", 1: "height: NEUTRAL", 2: "height: UP"}[val])
+            self.get_logger().info({0: "height: DOWN", 1: "height: HOLD", 2: "height: UP"}[val])
         self.height_state = val
+        self._heightdir_seen_this_tick = True  # indicates operator is actively commanding height direction
 
     def _on_auto_height(self, msg: Float32):
         self.last_auto_height = float(msg.data)
 
     # ---------- Helpers ----------
-    def _manual_active(self) -> bool:
-        if self.last_manual_time is None:
-            return False
-        elapsed = (self.get_clock().now() - self.last_manual_time).nanoseconds * 1e-9
-        return elapsed <= self.manual_timeout
-
     def _clamp_height(self, h: float) -> float:
         if self.max_height > self.min_height:
             return min(max(h, self.min_height), self.max_height)
@@ -123,29 +118,48 @@ class GCVelMux(Node):
 
     # ---------- Main loop ----------
     def _on_timer(self):
+        # Latch and immediately clear the per-tick flags so the decision is based on *this* cycle only.
+        manual_active = self._manual_seen_this_tick
+        height_active = self._heightdir_seen_this_tick
+        self._manual_seen_this_tick = False
+        self._heightdir_seen_this_tick = False
+
         out_cmd = Twist()
 
-        if self._manual_active():
-            # Forward manual twist
-            out_cmd = self.last_manual
-
-            # Height publishing (manual only)
-            if self.height_state in (0, 2):
-                if self.last_odom_z is not None and not math.isnan(self.last_odom_z):
-                    desired_h = self.last_odom_z + (self.height_offset if self.height_state == 2 else -self.height_offset)
-                    desired_h = self._clamp_height(desired_h)
-                    self.pub_h_out.publish(Float32(data=desired_h))
-                else:
-                    self.get_logger().warn("No odom z yet; cannot publish height (manual).", throttle_duration_sec=2.0)
-            # If NEUTRAL (1): publish nothing to height (as requested)
-        else:
-            # Auto: forward auto twist if we have one
-            if self.last_auto_time is not None:
-                out_cmd = self.last_auto
-            # Auto height: MUX republishes the explorer's value to the output topic
+        # Rule:
+        # - Use AUTO only if NEITHER manual_cmd_vel NOR height_direc published this tick.
+        # - Otherwise, use MANUAL:
+        #   * /cmd_vel: latest manual this tick if present, else zeros (no stale manual).
+        #   * /cmd_height: "offset from odom.z" logic as before.
+        if not manual_active and not height_active:
+            # ----- AUTO passthrough -----
+            out_cmd = self.last_auto  # safe even if default constructed
             if self.last_auto_height is not None:
                 self.pub_h_out.publish(Float32(data=self._clamp_height(self.last_auto_height)))
+        else:
+            # ----- MANUAL selected -----
+            # /cmd_vel
+            if manual_active:
+                out_cmd = self.last_manual
+            else:
+                # No manual twist this tick, publish zero to avoid stale motion while still letting manual height work.
+                out_cmd = Twist()
 
+            # /cmd_height (manual logic)
+            if self.last_odom_z is not None and not math.isnan(self.last_odom_z):
+                if self.height_state == 2:       # UP
+                    desired_h = self.last_odom_z + self.height_offset
+                    self.pub_h_out.publish(Float32(data=self._clamp_height(desired_h)))
+                elif self.height_state == 0:     # DOWN
+                    desired_h = self.last_odom_z - self.height_offset
+                    self.pub_h_out.publish(Float32(data=self._clamp_height(desired_h)))
+                else:                            # HOLD current height
+                    self.pub_h_out.publish(Float32(data=self._clamp_height(self.last_odom_z)))
+            else:
+                # Only warn occasionally to avoid spam.
+                self.get_logger().warn("No odom z yet; cannot publish /cmd_height (manual).", throttle_duration_sec=2.0)
+
+        # Publish the chosen velocity command
         self.pub_cmd.publish(out_cmd)
 
 
