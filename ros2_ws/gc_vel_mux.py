@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+import time
 from typing import Optional
 
 import rclpy
@@ -25,6 +26,9 @@ class GCVelMux(Node):
         self.declare_parameter('publish_rate', 30.0)
         self.declare_parameter('odom_topic', '/crazyflie_real/odom')
 
+        # NEW: short grace window to treat manual as active
+        self.declare_parameter('activity_grace_s', 0.25)
+
         # Height topics
         self.declare_parameter('auto_cmd_height_topic', '/auto_cmd_height')
         self.declare_parameter('cmd_height_out', '/cmd_height')
@@ -34,19 +38,24 @@ class GCVelMux(Node):
         self.declare_parameter('min_height', 0.0)
         self.declare_parameter('max_height', 0.0)
 
-        manual_topic = self.get_parameter('manual_topic').value
-        auto_topic = self.get_parameter('auto_topic').value
-        output_topic = self.get_parameter('output_topic').value
+        # ---------- Resolve params ----------
+        manual_topic = str(self.get_parameter('manual_topic').value)
+        auto_topic   = str(self.get_parameter('auto_topic').value)
+        output_topic = str(self.get_parameter('output_topic').value)
+
         publish_rate = float(self.get_parameter('publish_rate').value)
+        period = 1.0 / max(1e-3, publish_rate)
 
-        odom_topic = self.get_parameter('odom_topic').value
-        auto_h_in = self.get_parameter('auto_cmd_height_topic').value
-        cmd_h_out = self.get_parameter('cmd_height_out').value
-        height_direc_topic = self.get_parameter('height_direc_topic').value
+        odom_topic = str(self.get_parameter('odom_topic').value)
 
+        auto_h_in  = str(self.get_parameter('auto_cmd_height_topic').value)
+        cmd_h_out  = str(self.get_parameter('cmd_height_out').value)
+
+        height_direc_topic = str(self.get_parameter('height_direc_topic').value)
         self.height_offset = float(self.get_parameter('height_offset').value)
         self.min_height = float(self.get_parameter('min_height').value)
         self.max_height = float(self.get_parameter('max_height').value)
+        self.activity_grace_s = float(self.get_parameter('activity_grace_s').value)  # NEW
 
         # ---------- State ----------
         self.last_manual: Twist = Twist()
@@ -56,9 +65,9 @@ class GCVelMux(Node):
         self.height_state: int = 1  # 2=UP, 1=HOLD, 0=DOWN
         self.last_auto_height: Optional[float] = None
 
-        # Per-tick activity flags (set by callbacks, cleared each timer tick)
-        self._manual_seen_this_tick: bool = False
-        self._heightdir_seen_this_tick: bool = False
+        # Last-seen timestamps for activity latching (sec)
+        self._last_manual_time: float = 0.0
+        self._last_heightdir_time: float = 0.0  # NEW
 
         # ---------- IO ----------
         self.sub_manual = self.create_subscription(Twist, manual_topic, self._on_manual, 10)
@@ -67,11 +76,9 @@ class GCVelMux(Node):
         self.sub_hmode  = self.create_subscription(Int32, height_direc_topic, self._on_height_direc, 10)
         self.sub_auto_h = self.create_subscription(Float32, auto_h_in, self._on_auto_height, 10)
 
-        self.pub_cmd    = self.create_publisher(Twist, output_topic, 10)
-        self.pub_h_out  = self.create_publisher(Float32, cmd_h_out,   10)
+        self.pub_cmd = self.create_publisher(Twist, output_topic, 10)
+        self.pub_h_out = self.create_publisher(Float32, cmd_h_out, 10)
 
-        # ---------- Timer ----------
-        period = 1.0 / max(1e-3, publish_rate)
         self.timer = self.create_timer(period, self._on_timer)
 
         self.get_logger().info(
@@ -79,14 +86,14 @@ class GCVelMux(Node):
             f"  manual='{manual_topic}', auto='{auto_topic}', out='{output_topic}'\n"
             f"  odom='{odom_topic}', height_in(auto)='{auto_h_in}', height_out='{cmd_h_out}'\n"
             f"  height_direc='{height_direc_topic}', offset={self.height_offset} m\n"
-            f"  TIMEOUTS DISABLED: selection is per-tick activity based.\n"
+            f"  Manual latch: activity within last {self.activity_grace_s} s keeps MANUAL selected.\n"
             f"  clamp: min={self.min_height}, max={self.max_height} (disabled if max<=min)"
         )
 
     # ---------- Callbacks ----------
     def _on_manual(self, msg: Twist):
         self.last_manual = msg
-        self._manual_seen_this_tick = True  # indicates manual is actively publishing this cycle
+        self._last_manual_time = time.time()  # NEW: update last-seen time
 
     def _on_auto(self, msg: Twist):
         self.last_auto = msg  # always keep the freshest auto cmd
@@ -103,14 +110,17 @@ class GCVelMux(Node):
             self.get_logger().warn(f"Invalid /height_direc={val}; expected 0/1/2. Ignoring.")
             return
         if val != self.height_state:
-            self.get_logger().info({0: "height: DOWN", 1: "height: HOLD", 2: "height: UP"}[val])
-        self.height_state = val
-        self._heightdir_seen_this_tick = True  # indicates operator is actively commanding height direction
+            self.height_state = val
+        # no else: keep same value
+        self._last_heightdir_time = time.time()  # NEW
 
     def _on_auto_height(self, msg: Float32):
-        self.last_auto_height = float(msg.data)
+        try:
+            self.last_auto_height = float(msg.data)
+        except Exception:
+            self.last_auto_height = None
 
-    # ---------- Helpers ----------
+    # Helpers
     def _clamp_height(self, h: float) -> float:
         if self.max_height > self.min_height:
             return min(max(h, self.min_height), self.max_height)
@@ -118,18 +128,17 @@ class GCVelMux(Node):
 
     # ---------- Main loop ----------
     def _on_timer(self):
-        # Latch and immediately clear the per-tick flags so the decision is based on *this* cycle only.
-        manual_active = self._manual_seen_this_tick
-        height_active = self._heightdir_seen_this_tick
-        self._manual_seen_this_tick = False
-        self._heightdir_seen_this_tick = False
+        # Treat manual as active if seen within the recent grace window (prevents AUTO "creeping in").
+        now_t = time.time()
+        manual_active = (now_t - self._last_manual_time) <= self.activity_grace_s
+        height_active = (now_t - self._last_heightdir_time) <= self.activity_grace_s
 
         out_cmd = Twist()
 
         # Rule:
-        # - Use AUTO only if NEITHER manual_cmd_vel NOR height_direc published this tick.
+        # - Use AUTO only if NEITHER manual_cmd_vel NOR height_direc were seen within grace window.
         # - Otherwise, use MANUAL:
-        #   * /cmd_vel: latest manual this tick if present, else zeros (no stale manual).
+        #   * /cmd_vel: latest manual; if none, zeros.
         #   * /cmd_height: "offset from odom.z" logic as before.
         if not manual_active and not height_active:
             # ----- AUTO passthrough -----
@@ -138,11 +147,10 @@ class GCVelMux(Node):
                 self.pub_h_out.publish(Float32(data=self._clamp_height(self.last_auto_height)))
         else:
             # ----- MANUAL selected -----
-            # /cmd_vel
             if manual_active:
                 out_cmd = self.last_manual
             else:
-                # No manual twist this tick, publish zero to avoid stale motion while still letting manual height work.
+                # No fresh manual within grace window, send zero XY/Yaw
                 out_cmd = Twist()
 
             # /cmd_height (manual logic)

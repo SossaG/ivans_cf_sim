@@ -47,7 +47,7 @@ def generate_launch_description():
         launch_arguments={'gz_args': PathJoinSubstitution([
             pkg_project_gazebo,
             'worlds',
-            'crazyflie_world.sdf -r'
+            'crazyflie_world_corridor.sdf -r'
         ])}.items(),
     )
 

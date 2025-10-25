@@ -16,19 +16,13 @@ def generate_launch_description():
     odom_topic_arg     = DeclareLaunchArgument('odom_topic',     default_value='/crazyflie/odom')
     scan_topic_arg     = DeclareLaunchArgument('scan_topic',     default_value='/crazyflie/scan')
     cloud_in_arg       = DeclareLaunchArgument('cloud_in',       default_value='/crazyflie/pointcloud')
-    markers_topic_arg  = DeclareLaunchArgument('markers_topic',  default_value='/occupied_cells_vis_array')
-    cmd_vel_topic_arg  = DeclareLaunchArgument('cmd_vel_topic',  default_value='/auto_cmd_vel')
     height_offset_arg  = DeclareLaunchArgument('height_offset',  default_value='0.1')
-    teleop_in_own_terminal_arg = DeclareLaunchArgument('teleop_in_own_terminal', default_value='true')
-    
-    teleop_in_own_terminal = LaunchConfiguration('teleop_in_own_terminal')
+
     world_frame_id = LaunchConfiguration('world_frame_id')
     body_frame_id  = LaunchConfiguration('body_frame_id')
     odom_topic     = LaunchConfiguration('odom_topic')
     scan_topic     = LaunchConfiguration('scan_topic')
     cloud_in       = LaunchConfiguration('cloud_in')
-    markers_topic  = LaunchConfiguration('markers_topic')
-    cmd_vel_topic  = LaunchConfiguration('cmd_vel_topic')
     height_offset  = LaunchConfiguration('height_offset')
 
     # 1) multiranger -> pointcloud (kept parameterised; harmless if unused elsewhere)
@@ -54,12 +48,7 @@ def generate_launch_description():
         ),
         launch_arguments={
             'world_frame_id': world_frame_id,
-            'body_frame_id':  body_frame_id,
-            'odom_topic':     odom_topic,
-            'scan_topic':     scan_topic,
             'cloud_in':       cloud_in,
-            'markers_topic':  markers_topic,
-            'cmd_vel_topic':  cmd_vel_topic,
         }.items()
     )
 
@@ -71,7 +60,7 @@ def generate_launch_description():
         )
     )
 
-    # 4) Standalone Python: gc_vel_mux.py
+    # 4) Standalone Python: gc_vel_mux.py (same style & directory as before)
     vel_mux = ExecuteProcess(
         cmd=[
             'python3', 'gc_vel_mux.py',
@@ -84,23 +73,29 @@ def generate_launch_description():
         shell=False,
     )
 
-    # 5) Standalone Python: teleop_twist_keyboard_z.py
-
+    # 5) Standalone Python: teleop_twist_keyboard_z.py (unchanged)
     teleop = ExecuteProcess(
-        prefix='gnome-terminal --',                 # ✅ single string with a space
+        prefix='gnome-terminal --',
         cmd=['bash', '-lc', 'python3 teleop_twist_keyboard_z.py'],
         output='screen',
         shell=False,
     )
 
-
+    # 6) NEW: Standalone Python: orbslam3_explorer.py (same launch style & directory as vel_mux)
+    explorer = ExecuteProcess(
+        cmd=['python3', 'orbslam3_explorer.py'],
+        cwd=['.'],
+        output='screen',
+        shell=False,
+    )
 
     return LaunchDescription([
         world_frame_id_arg, body_frame_id_arg, odom_topic_arg, scan_topic_arg,
-        cloud_in_arg, markers_topic_arg, cmd_vel_topic_arg, height_offset_arg, teleop_in_own_terminal_arg,
+        cloud_in_arg, height_offset_arg,
         multiranger_pc,
         cf3d_nav_full,
-        simple_mapper,     # <— included with no arguments
+        simple_mapper,
         vel_mux,
         teleop,
+        explorer,
     ])
