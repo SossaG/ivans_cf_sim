@@ -40,6 +40,8 @@ class State(Enum):
     STRAIGHT_THROUGH_CORRIDOR = auto()
     BACKWARDS_THROUGH_CORRIDOR = auto()
     EXITING_INTERSECTION = auto()
+    # NEW: forward confirmation approach after front hit primary threshold
+    FORWARD_APPROACH_CONFIRM = auto()
 
 class CorridorExplorer(Node):
     def __init__(self):
@@ -54,7 +56,11 @@ class CorridorExplorer(Node):
         self.declare_parameter('default_height', 0.5)         # m
         self.declare_parameter('side_open_thresh', 2.0)
 
-        self.declare_parameter('intersection_front_thresh', 0.5)  # m
+        # Primary front threshold for detecting a wall ahead (YOU will set this to 2.0m)
+        self.declare_parameter('intersection_front_thresh', 2.0)  # m (was 0.5 before)
+
+        # NEW: Secondary confirmation stop threshold (keep going until this, unless side opens)
+        self.declare_parameter('front_confirm_stop', 1.0)     # m
 
         self.declare_parameter('corridor_v', 0.3)             # m/s (forward corridor)
         self.declare_parameter('nudge_v', 0.1)                # m/s (forward/back short nudge)
@@ -81,6 +87,7 @@ class CorridorExplorer(Node):
         self.SIDE_OPEN = float(self.get_parameter('side_open_thresh').value)
 
         self.FRONT_T = float(self.get_parameter('intersection_front_thresh').value)
+        self.FRONT_CONFIRM = float(self.get_parameter('front_confirm_stop').value)
 
         self.V_CORRIDOR = float(self.get_parameter('corridor_v').value)
         self.V_NUDGE = float(self.get_parameter('nudge_v').value)
@@ -131,6 +138,9 @@ class CorridorExplorer(Node):
         # Intersection memory (still using snapshot + reason, but no hysteresis/counters)
         self.intersection_snapshot = None   # (front,left,back,right) captured on entry
         self.intersection_reason = None     # 'front_blocked' | 'back_blocked' | 'side_open' | 'unknown'
+
+        # NEW: remember a side opening seen during forward-approach, but delay the turn until confirm distance
+        self.pending_side = None            # None | 'left' | 'right'
 
         # Main control timer
         self.timer = self.create_timer(1.0 / self.CTRL_HZ, self._control_tick)
@@ -267,20 +277,68 @@ class CorridorExplorer(Node):
             wz = self._corridor_yaw_control(left, right, forward=True)
             self._send_vel(self.V_CORRIDOR, 0.0, wz)
 
-            # Intersection detection from corridor (forward rules) - immediate, no hysteresis/cooldown
-            if (front < self.FRONT_T) or (left >= self.SIDE_OPEN) or (right >= self.SIDE_OPEN):
-
-                self.state = State.INTERSECTION
-                self.came_from_backwards_corridor = False
-                # reason + snapshot
-                if front < self.FRONT_T:
-                    self.intersection_reason = 'front_blocked'
-                elif (left >= self.SIDE_OPEN) or (right >= self.SIDE_OPEN):
-                    self.intersection_reason = 'side_open'
-                else:
-                    self.intersection_reason = 'unknown'
+            # NEW logic:
+            # If front trips the primary threshold, begin forward-approach confirmation
+            if front < self.FRONT_T:
+                # starting a fresh approach; clear any previous pending side
+                self.pending_side = None
+                self.state = State.FORWARD_APPROACH_CONFIRM
+                self.intersection_reason = 'front_blocked'
                 self.intersection_snapshot = (front, left, back, right)
                 self._log_state(self.state)
+            # Otherwise, classic side-opening to intersection
+            elif (left >= self.SIDE_OPEN) or (right >= self.SIDE_OPEN):
+                self.state = State.INTERSECTION
+                self.came_from_backwards_corridor = False
+                self.intersection_reason = 'side_open'
+                self.intersection_snapshot = (front, left, back, right)
+                self._log_state(self.state)
+
+        elif self.state == State.FORWARD_APPROACH_CONFIRM:
+            # Keep moving forward and keep centring, watching for side openings
+            wz = self._corridor_yaw_control(left, right, forward=True)
+            self._send_vel(self.V_CORRIDOR, 0.0, wz)
+
+            # If a side opens at any time, remember it but DO NOT turn yet
+            if (left >= self.SIDE_OPEN) or (right >= self.SIDE_OPEN):
+                if (left >= self.SIDE_OPEN) and (right >= self.SIDE_OPEN):
+                    self.pending_side = 'right' if (right >= left) else 'left'
+                elif left >= self.SIDE_OPEN:
+                    self.pending_side = 'left'
+                else:
+                    self.pending_side = 'right'
+                # Optional: lightweight log (not a state change)
+                self.get_logger().info(f"[APPROACH] Side opening detected -> pending turn: {self.pending_side}")
+
+            # On reaching the confirmation distance, either turn to the pending side (if any)
+            # or proceed to the original backwards flow.
+            if front <= self.FRONT_CONFIRM:
+                # Brief stop to avoid bumping the wall
+                self._send_vel(0.0, 0.0, 0.0)
+
+                if self.pending_side in ('left', 'right'):
+                    # Defer-turn now that we've centred at the intersection mouth
+                    if self.pending_side == 'left':
+                        self.state = State.TURN_LEFT
+                        self.turn_target_yaw = ang_wrap(self.yaw + self.TURN_ANGLE)
+                    else:
+                        self.state = State.TURN_RIGHT
+                        self.turn_target_yaw = ang_wrap(self.yaw - self.TURN_ANGLE)
+                    self.came_from_backwards_corridor = False
+                    # Clear snapshot/reason; this is a deterministic, deferred choice
+                    self.intersection_snapshot = None
+                    self.intersection_reason = None
+                    # Clear pending flag for next time
+                    self.pending_side = None
+                    self._log_state(self.state)
+                else:
+                    # No side opening observed during approach -> proceed to backwards flow as before
+                    self.state = State.GO_BACKWARDS
+                    self._nudge_until = now + self.NUDGE_DT
+                    self._exiting_forward = False
+                    # Mark that this decision came from forward corridor
+                    self.came_from_backwards_corridor = False
+                    self._log_state(self.state)
 
         elif self.state == State.BACKWARDS_THROUGH_CORRIDOR:
             # Move backwards with flipped yaw correction
@@ -368,7 +426,6 @@ class CorridorExplorer(Node):
                 self._send_vel(-self.V_CORRIDOR, 0.0, 0.0)
 
             if (left < self.SIDE_OPEN) and (right < self.SIDE_OPEN):
-
                 # Enter corridor mode with centring (forward/back as per last action)
                 if self._exiting_forward:
                     self.state = State.STRAIGHT_THROUGH_CORRIDOR
@@ -442,9 +499,6 @@ class CorridorExplorer(Node):
         backward_ok = (b_s >= self.FRONT_T)
         right_ok = (r_s >= self.SIDE_OPEN)
         left_ok  = (l_s >= self.SIDE_OPEN)
-
-
-
 
         # Forbid the direction that actually triggered the intersection
         if self.intersection_reason == 'front_blocked':
