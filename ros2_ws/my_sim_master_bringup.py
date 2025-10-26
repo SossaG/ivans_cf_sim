@@ -81,14 +81,6 @@ def generate_launch_description():
         shell=False,
     )
 
-    # 6) NEW: Standalone Python: orbslam3_explorer.py (same launch style & directory as vel_mux)
-    explorer = ExecuteProcess(
-        cmd=['python3', 'orbslam3_explorer.py'],
-        cwd=['.'],
-        output='screen',
-        shell=False,
-    )
-
     return LaunchDescription([
         world_frame_id_arg, body_frame_id_arg, odom_topic_arg, scan_topic_arg,
         cloud_in_arg, height_offset_arg,
@@ -97,5 +89,4 @@ def generate_launch_description():
         simple_mapper,
         vel_mux,
         teleop,
-        explorer,
     ])

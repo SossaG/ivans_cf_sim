@@ -1,349 +1,534 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Office corridor explorer for Crazyflie (ROS 2 Humble)
-with detailed terminal logging (manual throttle helper for Humble).
-"""
+# corridor_explorer.py
+# ROS2 Humble - Standalone state-machine explorer for 4-beam LaserScan + odom
+# Publishes planar velocity to /auto_cmd_vel and height setpoint to /auto_cmd_height
 
 import math
-from math import atan2, cos, sin, pi
+import time
+from enum import Enum, auto
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
-from geometry_msgs.msg import Twist
-from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import Twist
 from std_msgs.msg import Float32
 
-# ===========================
-# CONFIGURATION
-# ===========================
-FORWARD_SPEED = 0.30
-BACKWARD_SPEED = -0.30
-INCR_MOVE_SPEED = 0.10
-TURN_SPEED = 0.35
-STEP_DEG = 30.0
-STEP_RAD = STEP_DEG * pi / 180.0
-STEPS_PER_RIGHT_ANGLE = 3
-STEP_FWD_DIST = 0.20
-YAW_K = 0.50
-MAX_YAW = 0.6
-CORRIDOR_SIDE_MAX = 3.0
-FRONT_BLOCK = 2.0
-SIDE_OPEN = 3.0
-SCAN_MIN = 0.01
-SCAN_MAX = 3.49
-INTERSECTION_COOLDOWN = 10.0
-TARGET_INTERSECTIONS = 9
-DEFAULT_HEIGHT = 0.5
-LAND_OFFSET = 0.05
-LAND_Z_THRESHOLD = 0.20
-CONTROL_RATE = 30.0
+def ang_wrap(a):
+    """Wrap angle to [-pi, pi]."""
+    while a > math.pi:
+        a -= 2.0 * math.pi
+    while a < -math.pi:
+        a += 2.0 * math.pi
+    return a
 
-STATE_CORRIDOR_FWD = "corridor_forward"
-STATE_CORRIDOR_BACK = "corridor_backward"
-STATE_TURNING_RIGHT = "turning_right"
-STATE_TURNING_LEFT = "turning_left"
-STATE_LANDING = "landing"
-STATE_FINISHED = "finished"
+def quat_to_yaw(qx, qy, qz, qw):
+    """Extract yaw from quaternion."""
+    # yaw (z-axis rotation)
+    siny_cosp = 2.0 * (qw * qz + qx * qy)
+    cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+    return math.atan2(siny_cosp, cosy_cosp)
 
-SUB_TURN_YAW = "turn_yaw_step"
-SUB_TURN_FWD = "turn_forward_step"
-SUB_TURN_BACK = "turn_backward_step"
+class State(Enum):
+    INTERSECTION = auto()
+    GO_STRAIGHT = auto()
+    TURN_LEFT = auto()
+    TURN_RIGHT = auto()
+    GO_BACKWARDS = auto()
+    STRAIGHT_THROUGH_CORRIDOR = auto()
+    BACKWARDS_THROUGH_CORRIDOR = auto()
+    EXITING_INTERSECTION = auto()
 
-
-def clamp(v, vmin, vmax):
-    return max(vmin, min(v, vmax))
-
-
-def angle_diff(a, b):
-    d = (a - b + pi) % (2.0 * pi) - pi
-    return d
-
-
-class Explorer(Node):
+class CorridorExplorer(Node):
     def __init__(self):
-        super().__init__("office_explorer_verbose")
-        self.get_logger().info("=== Crazyflie Office Explorer Started ===")
+        super().__init__('corridor_explorer')
 
-        qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=10,
-            durability=DurabilityPolicy.VOLATILE,
-        )
+        # ---------------- Parameters ----------------
+        self.declare_parameter('scan_topic', '/crazyflie/scan')
+        self.declare_parameter('odom_topic', '/crazyflie/odom')
+        self.declare_parameter('cmd_vel_topic', '/auto_cmd_vel')
+        self.declare_parameter('cmd_height_topic', '/auto_cmd_height')
 
-        # Subscriptions
-        self.create_subscription(Odometry, "/crazyflie/odom", self._odom_cb, 10)
-        self.create_subscription(LaserScan, "/crazyflie/scan", self._scan_cb, qos)
-        self.create_subscription(LaserScan, "/crazyflie/range_up_scan", self._up_cb, qos)
-        self.create_subscription(LaserScan, "/crazyflie/range_down_scan", self._down_cb, qos)
+        self.declare_parameter('default_height', 0.5)         # m
+        self.declare_parameter('max_range', 3.49)             # m (LaserScan range_max ~3.49)
+        self.declare_parameter('intersection_front_thresh', 0.1)  # m
 
-        # Publishers
-        self.cmd_pub = self.create_publisher(Twist, "/auto_cmd_vel", 10)
-        self.height_pub = self.create_publisher(Float32, "/auto_cmd_height", 10)
+        self.declare_parameter('corridor_v', 0.3)             # m/s (forward corridor)
+        self.declare_parameter('nudge_v', 0.1)                # m/s (forward/back short nudge)
 
+        # Stronger, sign-correct centring control
+        self.declare_parameter('yaw_k', 3)                  # P-gain for wall centring
+        self.declare_parameter('max_yaw_rate', 1.2)           # rad/s clamp for centring
+
+        self.declare_parameter('turn_rate', 0.6)              # rad/s (stationary turn)
+        self.declare_parameter('turn_angle_deg', 90.0)        # degrees
+        self.declare_parameter('nudge_duration_s', 0.7)       # seconds to publish the post-turn/back/straight nudge
+        self.declare_parameter('control_rate_hz', 20.0)       # main loop rate
+
+        # Anti-flicker + logging controls
+        self.declare_parameter('front_hysteresis', 0.05)      # tighten forward availability
+        self.declare_parameter('log_ranges_on_state', True)   # log F/L/B/R on state change
+
+        self.declare_parameter('intersection_cooldown_s', 0.8)
+        self.declare_parameter('side_finite_count_required', 3)
+        self.declare_parameter('side_open_consec_required', 2)  # samples of side=inf to accept intersection
+
+
+        # Fetch params
+        self.scan_topic = self.get_parameter('scan_topic').value
+        self.odom_topic = self.get_parameter('odom_topic').value
+        self.cmd_vel_topic = self.get_parameter('cmd_vel_topic').value
+        self.cmd_height_topic = self.get_parameter('cmd_height_topic').value
+
+        self.default_height = float(self.get_parameter('default_height').value)
+        self.MAX_RANGE = float(self.get_parameter('max_range').value)
+        self.FRONT_T = float(self.get_parameter('intersection_front_thresh').value)
+
+        self.V_CORRIDOR = float(self.get_parameter('corridor_v').value)
+        self.V_NUDGE = float(self.get_parameter('nudge_v').value)
+        self.K_YAW = float(self.get_parameter('yaw_k').value)
+        self.MAX_YAW = float(self.get_parameter('max_yaw_rate').value)
+        self.TURN_RATE = float(self.get_parameter('turn_rate').value)
+        self.TURN_ANGLE = math.radians(float(self.get_parameter('turn_angle_deg').value))
+        self.NUDGE_DT = float(self.get_parameter('nudge_duration_s').value)
+        self.CTRL_HZ = float(self.get_parameter('control_rate_hz').value)
+
+        self.FRONT_HYS = float(self.get_parameter('front_hysteresis').value)
+        self.LOG_RANGES_ON_STATE = bool(self.get_parameter('log_ranges_on_state').value)
+
+
+        self.INTERSECTION_COOLDOWN = float(self.get_parameter('intersection_cooldown_s').value)
+        self.SIDE_FINITE_REQ = int(self.get_parameter('side_finite_count_required').value)
+        self.SIDE_OPEN_REQ = int(self.get_parameter('side_open_consec_required').value)
+
+        # cooldown / hysteresis trackers
+        self.last_intersection_exit_time = 0.0   # used in corridor states for cooldown
+        self.side_finite_counter = 0             # counts consecutive left & right finite in EXITING_INTERSECTION
+        self.side_open_counter = 0  # increments when (left or right) is inf while in corridor states
+
+
+
+        # ---------------- I/O ----------------
+        qos = QoSProfile(depth=10)
+        qos.reliability = ReliabilityPolicy.BEST_EFFORT
+        qos.history = HistoryPolicy.KEEP_LAST
+
+        self.scan_sub = self.create_subscription(LaserScan, self.scan_topic, self._on_scan, qos)
+        self.odom_sub = self.create_subscription(Odometry, self.odom_topic, self._on_odom, 10)
+
+        self.vel_pub = self.create_publisher(Twist, self.cmd_vel_topic, 10)
+        self.height_pub = self.create_publisher(Float32, self.cmd_height_topic, 10)
+
+        # ---------------- State vars ----------------
+
+        # Make sure these exist before any logging that calls _ranges()
+        self.last_scan = None
+        self.have_scan_mapping = False  
+
+
+        self.state = State.STRAIGHT_THROUGH_CORRIDOR  # start by moving forward down a corridor
+        self._log_state(self.state)
+
+        self.came_from_backwards_corridor = False  # for intersection priority rule
+        self._nudge_until = 0.0                    # time until which to keep nudging
+        self._exiting_forward = True               # which direction we’re exiting intersection with
+
+        # Scan mapping: indices for front/left/back/right beams (computed from angles)
+        self.have_scan_mapping = False
+        self.idx_front = None
+        self.idx_left = None
+        self.idx_back = None
+        self.idx_right = None
+        self.last_scan = None  # type: LaserScan
+
+        # Odom pose
         self.have_odom = False
-        self.have_scan = False
-        self.odom = Odometry()
-        self.front = self.left = self.back = self.right = None
-        self.up = self.down = None
+        self.yaw = 0.0
+        self.turn_target_yaw = None  # radians when in TURN_* states
 
-        self.state = STATE_CORRIDOR_FWD
-        self.forward_mode = True
-        self.last_intersection_time = 0.0
-        self.intersection_count = 0
+        # Intersection memory (anti-flicker)
+        self.intersection_snapshot = None   # (front,left,back,right) captured on entry
+        self.intersection_reason = None     # 'front_blocked' | 'back_blocked' | 'side_open' | 'unknown'
 
-        # turning state
-        self.turn_target_yaw = None
-        self.turn_step_index = 0
-        self.turn_substate = SUB_TURN_YAW
-        self.step_start_pose = None
+        # Main control timer
+        self.timer = self.create_timer(1.0 / self.CTRL_HZ, self._control_tick)
 
-        # manual throttle cache for logs
-        self._last_log = {}
+        
 
-        self.dt = 1.0 / CONTROL_RATE
-        self.create_timer(self.dt, self._tick)
+    # --------------- Subscribers ----------------
+    def _on_scan(self, msg: LaserScan):
+        self.last_scan = msg
+        if not self.have_scan_mapping:
+            self._compute_scan_mapping(msg)
 
-        self.get_logger().info(f"Default height: {DEFAULT_HEIGHT:.2f} m")
-
-    # ----------------- Logging helper (replaces info_throttle) -----------------
-    def _log_throttle(self, key: str, period_sec: float, msg: str, level: str = "info"):
-        now = self.get_clock().now().nanoseconds / 1e9
-        last = self._last_log.get(key, 0.0)
-        if (now - last) >= period_sec:
-            self._last_log[key] = now
-            # level: "info", "warn", "error", "debug"
-            log = getattr(self.get_logger(), level if level in ("info", "warn", "error", "debug") else "info")
-            log(msg)
-
-    # ----------- Subscribers -----------
-    def _odom_cb(self, msg):
-        self.odom = msg
+    def _on_odom(self, msg: Odometry):
+        q = msg.pose.pose.orientation
+        self.yaw = quat_to_yaw(q.x, q.y, q.z, q.w)
         self.have_odom = True
 
-    def _scan_cb(self, msg):
-        if not msg.ranges or len(msg.ranges) < 4:
-            return
-        vals = [self._clean_range(r) for r in msg.ranges[0:4]]
-        self.front, self.left, self.back, self.right = vals
-        self.have_scan = True
-
-    def _up_cb(self, msg):
-        if msg.ranges:
-            self.up = self._clean_range(msg.ranges[0])
-
-    def _down_cb(self, msg):
-        if msg.ranges:
-            self.down = self._clean_range(msg.ranges[0])
-
-    def _clean_range(self, r):
-        if r is None or math.isinf(r) or math.isnan(r):
-            return SCAN_MAX
-        return clamp(r, SCAN_MIN, SCAN_MAX)
-
-    # ----------- Helpers -----------
-    def _yaw_from_odom(self):
-        q = self.odom.pose.pose.orientation
-        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
-        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-        return atan2(siny_cosp, cosy_cosp)
-
-    def _xy_from_odom(self):
-        p = self.odom.pose.pose.position
-        return p.x, p.y
-
-    def _publish_cmd(self, vx, vy, wz):
-        msg = Twist()
-        msg.linear.x, msg.linear.y, msg.angular.z = vx, vy, wz
-        self.cmd_pub.publish(msg)
-
-    def _publish_height(self, h):
-        msg = Float32()
-        msg.data = h
-        self.height_pub.publish(msg)
-
-    # ----------- Detection helpers -----------
-    def _intersection_detected(self):
-        dead = self.front < FRONT_BLOCK if self.front is not None else False
-        open_side = ((self.left is not None and self.left > SIDE_OPEN) or
-                     (self.right is not None and self.right > SIDE_OPEN))
-        return dead or open_side
-
-    def _in_corridor_mode(self):
-        return (self.left is not None and self.right is not None and
-                self.left < CORRIDOR_SIDE_MAX and self.right < CORRIDOR_SIDE_MAX)
-
-    def _priorities(self):
-        return ["forward", "right", "left", "back"] if self.forward_mode else ["back", "right", "left", "forward"]
-
-    def _option_blocked(self, option):
-        if option == "forward":
-            return not (self.front is not None and self.front >= FRONT_BLOCK)
-        if option == "back":
-            return not (self.back is not None and self.back >= FRONT_BLOCK)
-        if option == "right":
-            return not (self.right is not None and self.right > SIDE_OPEN)
-        if option == "left":
-            return not (self.left is not None and self.left > SIDE_OPEN)
-        return True
-
-    # ----------- Main Tick Loop -----------
-    def _tick(self):
-        if not (self.have_odom and self.have_scan):
-            self._publish_height(DEFAULT_HEIGHT)
-            self._log_throttle("wait_sensors", 5.0, "Waiting for odom and scan data...")
+    # --------------- Helpers ----------------
+    def _compute_scan_mapping(self, scan: LaserScan):
+        """Map the four-beam LaserScan to front/left/back/right by angle proximity."""
+        n = len(scan.ranges)
+        if n < 4 or scan.angle_increment == 0.0:
+            self.get_logger().warn("Scan does not look like a 4-beam LaserScan yet; waiting...")
             return
 
-        # Regular status print
-        self._log_throttle(
-            "status", 1.0,
-            f"[STATE={self.state}] LIDARS: F={self.front:.2f} L={self.left:.2f} "
-            f"B={self.back:.2f} R={self.right:.2f} | Intersections={self.intersection_count}"
+        # Target angles for front, left, back, right in the scan frame
+        targets = {
+            'front': 0.0,
+            'left': math.pi / 2.0,
+            'back': math.pi,
+            'right': -math.pi / 2.0
+        }
+
+        # Build list of (index, angle) for beams
+        beams = []
+        for i in range(n):
+            ang = scan.angle_min + i * scan.angle_increment
+            ang = ang_wrap(ang)
+            beams.append((i, ang))
+
+        # Greedy assign each target to nearest beam by angular distance
+        assigned = {}
+        used = set()
+        for name, targ in targets.items():
+            best_i, best_d = None, 1e9
+            for (i, ang) in beams:
+                if i in used:
+                    continue
+                d = abs(ang_wrap(ang - targ))
+                if d < best_d:
+                    best_d, best_i = d, i
+            assigned[name] = best_i
+            used.add(best_i)
+
+        self.idx_front = assigned['front']
+        self.idx_left = assigned['left']
+        self.idx_back = assigned['back']
+        self.idx_right = assigned['right']
+        self.have_scan_mapping = True
+
+        self.get_logger().info(
+            f"Scan mapping set: front={self.idx_front}, left={self.idx_left}, "
+            f"back={self.idx_back}, right={self.idx_right}"
         )
 
-        # Default height
-        if self.state not in (STATE_LANDING, STATE_FINISHED):
-            self._publish_height(DEFAULT_HEIGHT)
+    def _ranges(self):
+        """Return (front, left, back, right) distances. Returns None if unavailable."""
+        scan = getattr(self, 'last_scan', None)
+        if (scan is None) or (not getattr(self, 'have_scan_mapping', False)):
+            return None
+        r = scan.ranges
+        try:
+            f = r[self.idx_front]
+            l = r[self.idx_left]
+            b = r[self.idx_back]
+            rr = r[self.idx_right]
+            return (f, l, b, rr)
+        except Exception as e:
+            self.get_logger().warn(f"Scan indexing issue: {e}")
+            return None
 
-        # LANDING PHASE
-        if self.state == STATE_LANDING:
-            z = self.odom.pose.pose.position.z
-            target_h = max(0.0, z - LAND_OFFSET)
-            self._publish_height(target_h)
-            self._publish_cmd(0.0, 0.0, 0.0)
-            self._log_throttle("landing", 1.0, f"Landing... current z={z:.2f} target={target_h:.2f}")
-            if z < LAND_Z_THRESHOLD:
-                self.state = STATE_FINISHED
-                self.get_logger().info("=== MAPPING FINISHED ===")
-            return
+    def _is_inf_or_max(self, val):
+        return math.isinf(val) or (val >= self.MAX_RANGE - 0.01)
 
-        if self.state == STATE_FINISHED:
-            self._publish_cmd(0.0, 0.0, 0.0)
-            return
+    def _publish_height(self):
+        msg = Float32()
+        msg.data = float(self.default_height)
+        self.height_pub.publish(msg)
 
-        # INTERSECTION HANDLING
-        if self._intersection_detected():
-            self.get_logger().info("Intersection detected.")
-            now = self.get_clock().now().nanoseconds / 1e9
-            if (now - self.last_intersection_time) > INTERSECTION_COOLDOWN and self._in_corridor_mode():
-                self.intersection_count += 1
-                self.last_intersection_time = now
-                self.get_logger().info(f"Intersection #{self.intersection_count} registered.")
+    def _send_vel(self, vx=0.0, vy=0.0, wz=0.0):
 
-                if self.intersection_count >= TARGET_INTERSECTIONS:
-                    self.get_logger().info("Target intersections reached -> initiating landing.")
-                    self.state = STATE_LANDING
-                    return
-
-                for opt in self._priorities():
-                    if not self._option_blocked(opt):
-                        self.get_logger().info(f"Chosen direction: {opt}")
-                        if opt == "forward":
-                            self.state = STATE_CORRIDOR_FWD
-                            self.forward_mode = True
-                        elif opt == "back":
-                            self.state = STATE_CORRIDOR_BACK
-                            self.forward_mode = False
-                        elif opt == "right":
-                            self._begin_turn("right")
-                        elif opt == "left":
-                            self._begin_turn("left")
-                        return
-
-        # STATE ACTIONS
-        if self.state == STATE_CORRIDOR_FWD:
-            err = (self.right - self.left)
-            wz = clamp(YAW_K * err, -MAX_YAW, MAX_YAW)
-            self._publish_cmd(FORWARD_SPEED, 0.0, wz)
-            self._log_throttle("corridor_fwd", 2.0, f"Forward corridor | yaw corr={wz:+.2f}")
-
-        elif self.state == STATE_CORRIDOR_BACK:
-            err = (self.right - self.left)
-            wz = clamp(YAW_K * err, -MAX_YAW, MAX_YAW)
-            self._publish_cmd(BACKWARD_SPEED, 0.0, wz)
-            self._log_throttle("corridor_back", 2.0, f"Backward corridor | yaw corr={wz:+.2f}")
-
-        elif self.state in (STATE_TURNING_LEFT, STATE_TURNING_RIGHT):
-            self._do_turn_tick(self.state == STATE_TURNING_RIGHT)
-
-    # ----------- Turning Helpers -----------
-    def _begin_turn(self, direction):
-        self.turn_step_index = 0
-        self.turn_substate = SUB_TURN_YAW
-        yaw = self._yaw_from_odom()
-        delta = STEP_RAD if direction == "right" else -STEP_RAD
-        self.turn_target_yaw = yaw + delta
-        self.state = STATE_TURNING_RIGHT if direction == "right" else STATE_TURNING_LEFT
-        self.get_logger().info(f"Begin incremental {direction} turn sequence.")
-
-    def _do_turn_tick(self, turning_right):
-        sign = 1.0 if turning_right else -1.0
-
-        if self.turn_substate == SUB_TURN_YAW:
-            yaw = self._yaw_from_odom()
-            err = angle_diff(self.turn_target_yaw, yaw)
-            if abs(err) > 0.02:
-                self._publish_cmd(0.0, 0.0, sign * TURN_SPEED)
-                self._log_throttle("turn_yaw", 0.5, f"Yaw step {self.turn_step_index+1}/3 | err={err:.3f}")
-                return
-            self.turn_substate = SUB_TURN_FWD
-            self.step_start_pose = (*self._xy_from_odom(), yaw)
-            self.get_logger().info("Yaw step done → moving forward 0.2 m.")
-
-        elif self.turn_substate == SUB_TURN_FWD:
-            if self._advance_along_body_x(+STEP_FWD_DIST, INCR_MOVE_SPEED):
-                self.turn_substate = SUB_TURN_BACK
-                self.step_start_pose = (*self._xy_from_odom(), self._yaw_from_odom())
-                self.get_logger().info("Forward step done → moving backward.")
-
-        elif self.turn_substate == SUB_TURN_BACK:
-            if self._advance_along_body_x(-STEP_FWD_DIST, -INCR_MOVE_SPEED):
-                self.turn_step_index += 1
-                if self.turn_step_index >= STEPS_PER_RIGHT_ANGLE:
-                    self.get_logger().info("Completed full 90° incremental turn.")
-                    self.state = STATE_CORRIDOR_FWD
-                    self.forward_mode = True
+        # Replace NaN or Inf with zero to prevent invalid commands (the sim nan joint velocity value error)
+        for val_name, val in zip(["vx", "vy", "wz"], [vx, vy, wz]):
+            if not math.isfinite(val):
+                self.get_logger().warn(f"Invalid velocity ({val_name}={val}); publishing 0 instead.")
+                if val_name == "vx":
+                    vx = 0.0
+                elif val_name == "vy":
+                    vy = 0.0
                 else:
-                    yaw_now = self._yaw_from_odom()
-                    delta = STEP_RAD if turning_right else -STEP_RAD
-                    self.turn_target_yaw = yaw_now + delta
-                    self.turn_substate = SUB_TURN_YAW
-                    self.step_start_pose = None
-                    self.get_logger().info(f"Next yaw target set (step {self.turn_step_index+1}/3).")
+                    wz = 0.0
 
-    def _advance_along_body_x(self, target_dist, vx):
-        if self.step_start_pose is None:
-            self.step_start_pose = (*self._xy_from_odom(), self._yaw_from_odom())
+        """Publish planar velocity (x forward, y sideways, yaw rate)."""
+        t = Twist()
+        t.linear.x = float(vx)
+        t.linear.y = float(vy)
+        t.linear.z = 0.0  # controller ignores z on this topic
+        t.angular.x = 0.0
+        t.angular.y = 0.0
+        t.angular.z = float(wz)
+        self.vel_pub.publish(t)
 
-        x0, y0, yaw0 = self.step_start_pose
-        x, y = self._xy_from_odom()
-        dx, dy = x - x0, y - y0
-        traveled = dx * cos(yaw0) + dy * sin(yaw0)
+    def _log_state(self, s: State):
+        if self.LOG_RANGES_ON_STATE:
+            rng = self._ranges()
+            if rng is not None:
+                f, l, b, r = rng
+                self.get_logger().info(f"[STATE] {s.name} | LIDARS (m): F={f:.2f} L={l:.2f} B={b:.2f} R={r:.2f}")
+                return
+        self.get_logger().info(f"[STATE] {s.name}")
 
-        if abs(target_dist - traveled) > 0.02:
-            self._publish_cmd(vx, 0.0, 0.0)
-            return False
+    # --------------- State machine core ----------------
+    def _control_tick(self):
+        # Always publish the current height setpoint
+        self._publish_height()
 
-        self._publish_cmd(0.0, 0.0, 0.0)
-        return True
+        rng = self._ranges()
+        if rng is None or not self.have_odom:
+            # Not enough info yet; keep still
+            self._send_vel(0.0, 0.0, 0.0)
+            return
+
+        front, left, back, right = rng
+        now = time.time()
+
+        # ------------ Transition checks & actions per state ------------
+        if self.state == State.STRAIGHT_THROUGH_CORRIDOR:
+            # Keep moving forward with yaw correction (wall centring).
+            wz = self._corridor_yaw_control(left, right, forward=True)
+            self._send_vel(self.V_CORRIDOR, 0.0, wz)
+
+            # Intersection detection from corridor (forward rules) with cooldown + side-open hysteresis
+            if (time.time() - self.last_intersection_exit_time) >= self.INTERSECTION_COOLDOWN:
+                side_open = self._is_inf_or_max(left) or self._is_inf_or_max(right)
+                if side_open:
+                    self.side_open_counter += 1
+                else:
+                    self.side_finite_counter = 0
+                    self.side_open_counter = 0
+                    self.last_intersection_exit_time = time.time()
+
+
+                if (front < self.FRONT_T) or (self.side_open_counter >= self.SIDE_OPEN_REQ):
+                    self.state = State.INTERSECTION
+                    self.came_from_backwards_corridor = False
+                    # reason + snapshot
+                    if front < self.FRONT_T:
+                        self.intersection_reason = 'front_blocked'
+                    elif self.side_open_counter >= self.SIDE_OPEN_REQ:
+                        self.intersection_reason = 'side_open'
+                    else:
+                        self.intersection_reason = 'unknown'
+                    self.intersection_snapshot = (front, left, back, right)
+                    self._log_state(self.state)
+
+
+        elif self.state == State.BACKWARDS_THROUGH_CORRIDOR:
+            # Move backwards with flipped yaw correction
+            wz = self._corridor_yaw_control(left, right, forward=False)
+            self._send_vel(-self.V_CORRIDOR, 0.0, wz)
+
+            # Intersection detection from corridor (backwards rules) with cooldown + side-open hysteresis
+            if (time.time() - self.last_intersection_exit_time) >= self.INTERSECTION_COOLDOWN:
+                side_open = self._is_inf_or_max(left) or self._is_inf_or_max(right)
+                if side_open:
+                    self.side_open_counter += 1
+                else:
+                    self.side_finite_counter = 0
+                    self.side_open_counter = 0
+                    self.last_intersection_exit_time = time.time()
+
+
+                if (back < self.FRONT_T) or (self.side_open_counter >= self.SIDE_OPEN_REQ):
+                    self.state = State.INTERSECTION
+                    self.came_from_backwards_corridor = True
+                    # reason + snapshot
+                    if back < self.FRONT_T:
+                        self.intersection_reason = 'back_blocked'
+                    elif self.side_open_counter >= self.SIDE_OPEN_REQ:
+                        self.intersection_reason = 'side_open'
+                    else:
+                        self.intersection_reason = 'unknown'
+                    self.intersection_snapshot = (front, left, back, right)
+                    self._log_state(self.state)
+
+
+        elif self.state == State.INTERSECTION:
+            # Decide next state based on priorities (using snapshot to avoid flicker).
+            next_state = self._choose_intersection_next(front, left, right)
+            self.state = next_state
+
+            # Decision taken; clear snapshot to avoid stale data affecting next intersections
+            self.intersection_snapshot = None
+            self.intersection_reason = None
+
+            self._log_state(self.state)
+
+            if self.state in (State.TURN_LEFT, State.TURN_RIGHT):
+                # Set turn target
+                sign = +1.0 if self.state == State.TURN_LEFT else -1.0
+                self.turn_target_yaw = ang_wrap(self.yaw + sign * self.TURN_ANGLE)
+            elif self.state == State.GO_STRAIGHT:
+                self._nudge_until = now + self.NUDGE_DT  # brief forward nudge before EXITING_INTERSECTION
+            elif self.state == State.GO_BACKWARDS:
+                self._nudge_until = now + self.NUDGE_DT  # brief backward nudge before EXITING_INTERSECTION
+
+        elif self.state == State.TURN_LEFT or self.state == State.TURN_RIGHT:
+            # Perform stationary turn toward target yaw
+            if self.turn_target_yaw is None:
+                # Safety: set a target if missing
+                sign = +1.0 if self.state == State.TURN_LEFT else -1.0
+                self.turn_target_yaw = ang_wrap(self.yaw + sign * self.TURN_ANGLE)
+
+            err = ang_wrap(self.turn_target_yaw - self.yaw)
+            if abs(err) > math.radians(3.0):
+                # Turn in the direction of error at fixed rate
+                wz = self.TURN_RATE if err > 0.0 else -self.TURN_RATE
+                self._send_vel(0.0, 0.0, wz)
+            else:
+                # Turn complete: stop yaw, then brief forward nudge
+                self._send_vel(0.0, 0.0, 0.0)
+                self.turn_target_yaw = None
+                self.state = State.GO_STRAIGHT
+                self._nudge_until = now + self.NUDGE_DT
+                self._log_state(self.state)
+
+        elif self.state == State.GO_STRAIGHT:
+            # Brief forward velocity, then EXITING_INTERSECTION
+            if now < self._nudge_until:
+                self._send_vel(self.V_NUDGE, 0.0, 0.0)
+            else:
+                self.state = State.EXITING_INTERSECTION
+                self._exiting_forward = True
+                self._log_state(self.state)
+
+        elif self.state == State.GO_BACKWARDS:
+            # Brief backward velocity, then EXITING_INTERSECTION
+            if now < self._nudge_until:
+                self._send_vel(-self.V_NUDGE, 0.0, 0.0)
+            else:
+                self.state = State.EXITING_INTERSECTION
+                self._exiting_forward = False
+                self._log_state(self.state)
+
+        elif self.state == State.EXITING_INTERSECTION:
+            # Keep moving straight (no centring) until both side walls are visible (finite)
+            if self._exiting_forward:
+                self._send_vel(self.V_CORRIDOR, 0.0, 0.0)
+            else:
+                self._send_vel(-self.V_CORRIDOR, 0.0, 0.0)
+
+            if (not self._is_inf_or_max(left)) and (not self._is_inf_or_max(right)):
+                # Enter corridor mode with centring (forward/back as per last action)
+                if self._exiting_forward:
+                    self.state = State.STRAIGHT_THROUGH_CORRIDOR
+                    self.state = State.STRAIGHT_THROUGH_CORRIDOR
+                    self.came_from_backwards_corridor = False
+                else:
+                    self.state = State.BACKWARDS_THROUGH_CORRIDOR
+                    self.came_from_backwards_corridor = True
+                    self.state = State.STRAIGHT_THROUGH_CORRIDOR
+                self._log_state(self.state)
+
+        else:
+            # Fallback safety
+            self._send_vel(0.0, 0.0, 0.0)
+
+    # --------------- Control/logic utilities ----------------
+    def _corridor_yaw_control(self, left, right, forward=True):
+        """
+        Centre between side walls using left/right ranges.
+        If right > left (more space on the right, you're closer to the left wall),
+        you should yaw RIGHT (negative wz). Hence the leading minus sign.
+        For backwards motion we flip the sign so the behaviour is mirrored.
+        """
+        # difference: positive when more space on right than left
+        diff = (right - left)
+
+        # small deadband to avoid twitch
+        if abs(diff) < 0.02:
+            diff = 0.0
+
+        # correct sign: negative turns right when right-left > 0 (closer to left wall)
+        wz_cmd = -self.K_YAW * diff
+
+        # flip when reversing so the “keep straight” logic feels the same
+        if not forward:
+            wz_cmd = -wz_cmd
+
+        # clamp
+        if wz_cmd > self.MAX_YAW:
+            wz_cmd = self.MAX_YAW
+        elif wz_cmd < -self.MAX_YAW:
+            wz_cmd = -self.MAX_YAW
+
+        return wz_cmd
+
+    def _choose_intersection_next(self, front, left, right):
+        """
+        Decide next state using the snapshot captured on INTERSECTION entry.
+        Mirrors forward/back logic:
+        - If trigger was front_blocked -> forbid GO_STRAIGHT.
+        - If trigger was back_blocked  -> forbid GO_BACKWARDS.
+        Availability (with hysteresis on the blocked direction):
+        forward_ok = f_s >= FRONT_T + FRONT_HYS
+        backward_ok = b_s >= FRONT_T + FRONT_HYS
+        right_ok = side opening (inf/max)
+        left_ok  = side opening (inf/max)
+        Priorities:
+        - Normal: forward > right > left > backwards
+        - From backwards corridor: backwards > right > left > forward
+        """
+        # Use snapshot if available
+        if self.intersection_snapshot is not None:
+            f_s, l_s, b_s, r_s = self.intersection_snapshot
+        else:
+            # Fallback to current (should be rare)
+            rng = self._ranges()
+            if rng is not None:
+                f_s, l_s, b_s, r_s = rng
+            else:
+                # If we truly have nothing, play it safe and stop
+                return State.GO_BACKWARDS if self.came_from_backwards_corridor else State.GO_STRAIGHT
+
+        # Availability with hysteresis on the forward/backward blocking directions
+        forward_ok  = (f_s >= (self.FRONT_T + self.FRONT_HYS))
+        backward_ok = (b_s >= (self.FRONT_T + self.FRONT_HYS))
+        right_ok    = self._is_inf_or_max(r_s)
+        left_ok     = self._is_inf_or_max(l_s)
+
+        # Forbid the direction that actually triggered the intersection
+        if self.intersection_reason == 'front_blocked':
+            forward_ok = False
+        elif self.intersection_reason == 'back_blocked':
+            backward_ok = False
+
+        if self.came_from_backwards_corridor:
+            # Priority: backwards > right > left > forward
+            if backward_ok:
+                return State.GO_BACKWARDS
+            if right_ok:
+                return State.TURN_RIGHT
+            if left_ok:
+                return State.TURN_LEFT
+            return State.GO_STRAIGHT
+        else:
+            # Priority: forward > right > left > backwards
+            if forward_ok:
+                return State.GO_STRAIGHT
+            if right_ok:
+                return State.TURN_RIGHT
+            if left_ok:
+                return State.TURN_LEFT
+            return State.GO_BACKWARDS
+
 
 
 def main():
     rclpy.init()
-    node = Explorer()
+    node = CorridorExplorer()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
-        node.get_logger().info("Shutting down explorer...")
+        node._send_vel(0.0, 0.0, 0.0)
         node.destroy_node()
         rclpy.shutdown()
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
