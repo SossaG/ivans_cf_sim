@@ -36,102 +36,11 @@ Copyright (c) 2024 Bitcraze
       <visual name="crazyflie/body_visual">
         <geometry>
           <mesh>
-            <uri>../../../meshes/collada_files/cf2_assembly.dae</uri>
+            <uri>meshes/cf2_assembly.dae</uri>
           </mesh>
         </geometry>
       </visual>
-      
-      
-      <!-- UPWARD single-beam ray (points +Z) -->
-      <sensor name='range_up' type='gpu_lidar'>
-        <!-- Rotate -90° about Y so the ray (X-axis) points along +Z -->
-        <pose relative_to='crazyflie/base_link'>0 0 0.15 0 -1.5708 0</pose>
-        <update_rate>30</update_rate>
-        <ray>
-          <scan>
-            <horizontal>
-              <samples>1</samples>
-              <resolution>1</resolution>
-              <min_angle>0</min_angle>
-              <max_angle>0</max_angle>
-            </horizontal>
-            <vertical>
-              <samples>1</samples>
-              <resolution>1</resolution>
-              <min_angle>0</min_angle>
-              <max_angle>0</max_angle>
-            </vertical>
-          </scan>
-          <range>
-            <min>0.01</min>
-            <max>3.49</max>
-            <resolution>0.01</resolution>
-          </range>
-        </ray>
-        <always_on>1</always_on>
-        <visualize>true</visualize>
-        <topic>range_up_scan</topic>
-      </sensor>
-
-      <!-- DOWNWARD single-beam ray (points -Z) -->
-      <sensor name='range_down' type='gpu_lidar'>
-        <!-- Rotate +90° about Y so the ray (X-axis) points along -Z -->
-        <pose relative_to='crazyflie/base_link'>0 0 -0.15 0 1.5708 0</pose>
-        <update_rate>30</update_rate>
-        <ray>
-          <scan>
-            <horizontal>
-              <samples>1</samples>
-              <resolution>1</resolution>
-              <min_angle>0</min_angle>
-              <max_angle>0</max_angle>
-            </horizontal>
-            <vertical>
-              <samples>1</samples>
-              <resolution>1</resolution>
-              <min_angle>0</min_angle>
-              <max_angle>0</max_angle>
-            </vertical>
-          </scan>
-          <range>
-            <min>0.01</min>
-            <max>3.49</max>
-            <resolution>0.01</resolution>
-          </range>
-        </ray>
-        <always_on>1</always_on>
-        <visualize>true</visualize>
-        <topic>range_down_scan</topic>
-      </sensor>
-
-      <sensor name='multiranger' type='gpu_lidar'>
-        <pose relative_to='crazyflie/base_link'>0 0 0.1 0 0 0</pose>
-        <topic>lidar</topic>
-        <update_rate>60</update_rate>
-        <ray>
-          <scan>
-            <horizontal>
-                <samples>4</samples>
-                <resolution>1</resolution>
-                <min_angle>-3.14</min_angle>
-                <max_angle>1.57</max_angle>
-            </horizontal>
-            <vertical>
-                <samples>1</samples>
-                <resolution>0.01</resolution>
-                <min_angle>0</min_angle>
-                <max_angle>0</max_angle>
-            </vertical>
-          </scan>
-          <range>
-            <min>0.01</min>
-            <max>3.49</max>
-            <resolution>0.01</resolution>
-          </range>
-        </ray>
-        <always_on>1</always_on>
-        <visualize>true</visualize>
-      </sensor>
+      <!-- multiranger sensor moved to gimballed link below -->
     </link>
     <link name="crazyflie/m1_prop">
       <pose>0.031 -0.031 0.021 0 0 0</pose>
@@ -146,7 +55,7 @@ Copyright (c) 2024 Bitcraze
       <visual name="crazyflie/m1_visual">
         <geometry>
           <mesh>
-            <uri>../../../meshes/collada_files/ccw_prop.dae</uri>
+            <uri>meshes/ccw_prop.dae</uri>
           </mesh>
         </geometry>
       </visual>
@@ -164,7 +73,7 @@ Copyright (c) 2024 Bitcraze
       <visual name="crazyflie/m2_visual">
         <geometry>
           <mesh>
-            <uri>../../../meshes/collada_files/cw_prop.dae</uri>
+            <uri>meshes/cw_prop.dae</uri>
           </mesh>
         </geometry>
       </visual>
@@ -182,7 +91,7 @@ Copyright (c) 2024 Bitcraze
       <visual name="crazyflie/m3_visual">
         <geometry>
           <mesh>
-            <uri>../../../meshes/collada_files/ccw_prop.dae</uri>
+            <uri>meshes/ccw_prop.dae</uri>
           </mesh>
         </geometry>
       </visual>
@@ -200,7 +109,7 @@ Copyright (c) 2024 Bitcraze
       <visual name="crazyflie/m4_visual">
         <geometry>
           <mesh>
-            <uri>../../../meshes/collada_files/cw_prop.dae</uri>
+            <uri>meshes/cw_prop.dae</uri>
           </mesh>
         </geometry>
       </visual>
@@ -243,7 +152,7 @@ Copyright (c) 2024 Bitcraze
       <maxRotVelocity>2618</maxRotVelocity>
       <motorConstant>1.28192e-08</motorConstant>
       <momentConstant>0.005964552</momentConstant>
-      <rotorDragCoefficient>2.0e-05</rotorDragCoefficient>
+      <rotorDragCoefficient>8.06428e-05</rotorDragCoefficient>
       <rollingMomentCoefficient>0.0000001</rollingMomentCoefficient>
       <rotorVelocitySlowdownSim>20</rotorVelocitySlowdownSim>
       <actuator_number>0</actuator_number>
@@ -259,7 +168,7 @@ Copyright (c) 2024 Bitcraze
       <maxRotVelocity>2618</maxRotVelocity>
       <motorConstant>1.28192e-08</motorConstant>
       <momentConstant>0.005964552</momentConstant>
-      <rotorDragCoefficient>2.0e-05</rotorDragCoefficient>
+      <rotorDragCoefficient>8.06428e-05</rotorDragCoefficient>
       <rollingMomentCoefficient>0.0000001</rollingMomentCoefficient>
       <rotorVelocitySlowdownSim>20</rotorVelocitySlowdownSim>
       <actuator_number>1</actuator_number>
@@ -275,7 +184,7 @@ Copyright (c) 2024 Bitcraze
       <maxRotVelocity>2618</maxRotVelocity>
       <motorConstant>1.28192e-08</motorConstant>
       <momentConstant>0.005964552</momentConstant>
-      <rotorDragCoefficient>2.0e-05</rotorDragCoefficient>
+      <rotorDragCoefficient>8.06428e-05</rotorDragCoefficient>
       <rollingMomentCoefficient>0.0000001</rollingMomentCoefficient>
       <rotorVelocitySlowdownSim>20</rotorVelocitySlowdownSim>
       <actuator_number>2</actuator_number>
@@ -291,7 +200,7 @@ Copyright (c) 2024 Bitcraze
       <maxRotVelocity>2618</maxRotVelocity>
       <motorConstant>1.28192e-08</motorConstant>
       <momentConstant>0.005964552</momentConstant>
-      <rotorDragCoefficient>2.0e-05</rotorDragCoefficient>
+      <rotorDragCoefficient>8.06428e-05</rotorDragCoefficient>
       <rollingMomentCoefficient>0.0000001</rollingMomentCoefficient>
       <rotorVelocitySlowdownSim>20</rotorVelocitySlowdownSim>
       <actuator_number>3</actuator_number>
@@ -304,7 +213,7 @@ Copyright (c) 2024 Bitcraze
       <commandSubTopic>gazebo/command/twist</commandSubTopic>
       <enableSubTopic>enable</enableSubTopic>
       <comLinkName>crazyflie/body</comLinkName>
-      <velocityGain>0.4 0.4 0.2425</velocityGain>
+      <velocityGain>1.25 1.25 0.2425</velocityGain>
       <attitudeGain>0.02 0.02 0.02</attitudeGain>
       <angularRateGain>0.005 0.005 0.005</angularRateGain>
       <rotorConfiguration>
@@ -339,5 +248,74 @@ Copyright (c) 2024 Bitcraze
       name="gz::sim::systems::OdometryPublisher">
       <dimensions>3</dimensions>
     </plugin>
-  </model>
+  
+    <!-- Gimballed multiranger link that follows body translation/yaw but stays level in roll/pitch -->
+    <link name="multiranger_link">
+      <pose relative_to='crazyflie/body'>0 0 0.1 0 0 0</pose>
+      <inertial>
+        <mass>0.0005</mass>
+        <inertia>
+          <ixx>1e-6</ixx><iyy>1e-6</iyy><izz>1e-6</izz>
+          <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz>
+        </inertia>
+      </inertial>
+      <gravity>0</gravity>
+      <self_collide>0</self_collide>
+      <sensor name='multiranger' type='gpu_lidar'>
+"
+        <pose>0 0 0 0 0 0</pose>
+        <topic>lidar</topic>
+        <update_rate>10</update_rate>
+        <ray>
+          <scan>
+            <horizontal>
+                <samples>4</samples>
+                <resolution>1</resolution>
+                <min_angle>-3.14</min_angle>
+                <max_angle>1.57</max_angle>
+            </horizontal>
+            <vertical>
+                <samples>1</samples>
+                <resolution>0.01</resolution>
+                <min_angle>0</min_angle>
+                <max_angle>0</max_angle>
+            </vertical>
+          </scan>
+          <range>
+            <min>0.01</min>
+            <max>3.49</max>
+            <resolution>0.01</resolution>
+          </range>
+        </ray>
+        <always_on>1</always_on>
+        <visualize>true</visualize>
+      </sensor>
+      </sensor>
+    </link>
+
+    <!-- Yaw-only joint: body -> multiranger_link (allows yaw, filters pitch/roll from the parent) -->
+    <joint name="multiranger_yaw_joint" type="revolute">
+      <parent>crazyflie/body</parent>
+      <child>multiranger_link</child>
+      <pose>0 0 0 0 0 0</pose>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <use_parent_model_frame>true</use_parent_model_frame>
+        <limit>
+          <lower>-1e16</lower>
+          <upper>1e16</upper>
+        </limit>
+        <dynamics>
+          <damping>0.05</damping>
+        </dynamics>
+      </axis>
+    </joint>
+
+    <!-- Plugin to actively keep the multiranger level (roll=0,pitch=0) while following body yaw.
+         Build the C++ plugin below as 'liblevel_gimbal.so' and ensure it's discoverable by gz-sim. -->
+    <plugin name="level_gimbal" filename="liblevel_gimbal.so">
+      <controlled_link>multiranger_link</controlled_link>
+      <follow_link>crazyflie/body</follow_link>
+    </plugin>
+</model>
 </sdf>

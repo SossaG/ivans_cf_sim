@@ -52,29 +52,24 @@ class CorridorExplorer(Node):
         self.declare_parameter('cmd_height_topic', '/auto_cmd_height')
 
         self.declare_parameter('default_height', 0.5)         # m
-        self.declare_parameter('max_range', 3.49)             # m (LaserScan range_max ~3.49)
-        self.declare_parameter('intersection_front_thresh', 0.1)  # m
+        self.declare_parameter('side_open_thresh', 2.0)
+
+        self.declare_parameter('intersection_front_thresh', 0.5)  # m
 
         self.declare_parameter('corridor_v', 0.3)             # m/s (forward corridor)
         self.declare_parameter('nudge_v', 0.1)                # m/s (forward/back short nudge)
 
         # Stronger, sign-correct centring control
-        self.declare_parameter('yaw_k', 3)                  # P-gain for wall centring
-        self.declare_parameter('max_yaw_rate', 1.2)           # rad/s clamp for centring
+        self.declare_parameter('yaw_k', 0.8)                  # P-gain for wall centring
+        self.declare_parameter('max_yaw_rate', 0.8)           # rad/s clamp for centring
 
         self.declare_parameter('turn_rate', 0.6)              # rad/s (stationary turn)
         self.declare_parameter('turn_angle_deg', 90.0)        # degrees
         self.declare_parameter('nudge_duration_s', 0.7)       # seconds to publish the post-turn/back/straight nudge
         self.declare_parameter('control_rate_hz', 20.0)       # main loop rate
 
-        # Anti-flicker + logging controls
-        self.declare_parameter('front_hysteresis', 0.05)      # tighten forward availability
+        # Logging control
         self.declare_parameter('log_ranges_on_state', True)   # log F/L/B/R on state change
-
-        self.declare_parameter('intersection_cooldown_s', 0.8)
-        self.declare_parameter('side_finite_count_required', 3)
-        self.declare_parameter('side_open_consec_required', 2)  # samples of side=inf to accept intersection
-
 
         # Fetch params
         self.scan_topic = self.get_parameter('scan_topic').value
@@ -83,7 +78,8 @@ class CorridorExplorer(Node):
         self.cmd_height_topic = self.get_parameter('cmd_height_topic').value
 
         self.default_height = float(self.get_parameter('default_height').value)
-        self.MAX_RANGE = float(self.get_parameter('max_range').value)
+        self.SIDE_OPEN = float(self.get_parameter('side_open_thresh').value)
+
         self.FRONT_T = float(self.get_parameter('intersection_front_thresh').value)
 
         self.V_CORRIDOR = float(self.get_parameter('corridor_v').value)
@@ -95,20 +91,7 @@ class CorridorExplorer(Node):
         self.NUDGE_DT = float(self.get_parameter('nudge_duration_s').value)
         self.CTRL_HZ = float(self.get_parameter('control_rate_hz').value)
 
-        self.FRONT_HYS = float(self.get_parameter('front_hysteresis').value)
         self.LOG_RANGES_ON_STATE = bool(self.get_parameter('log_ranges_on_state').value)
-
-
-        self.INTERSECTION_COOLDOWN = float(self.get_parameter('intersection_cooldown_s').value)
-        self.SIDE_FINITE_REQ = int(self.get_parameter('side_finite_count_required').value)
-        self.SIDE_OPEN_REQ = int(self.get_parameter('side_open_consec_required').value)
-
-        # cooldown / hysteresis trackers
-        self.last_intersection_exit_time = 0.0   # used in corridor states for cooldown
-        self.side_finite_counter = 0             # counts consecutive left & right finite in EXITING_INTERSECTION
-        self.side_open_counter = 0  # increments when (left or right) is inf while in corridor states
-
-
 
         # ---------------- I/O ----------------
         qos = QoSProfile(depth=10)
@@ -123,10 +106,9 @@ class CorridorExplorer(Node):
 
         # ---------------- State vars ----------------
 
-        # Make sure these exist before any logging that calls _ranges()
+        # Ensure these exist before any logging that calls _ranges()
         self.last_scan = None
-        self.have_scan_mapping = False  
-
+        self.have_scan_mapping = False
 
         self.state = State.STRAIGHT_THROUGH_CORRIDOR  # start by moving forward down a corridor
         self._log_state(self.state)
@@ -136,26 +118,22 @@ class CorridorExplorer(Node):
         self._exiting_forward = True               # which direction we’re exiting intersection with
 
         # Scan mapping: indices for front/left/back/right beams (computed from angles)
-        self.have_scan_mapping = False
         self.idx_front = None
         self.idx_left = None
         self.idx_back = None
         self.idx_right = None
-        self.last_scan = None  # type: LaserScan
 
         # Odom pose
         self.have_odom = False
         self.yaw = 0.0
         self.turn_target_yaw = None  # radians when in TURN_* states
 
-        # Intersection memory (anti-flicker)
+        # Intersection memory (still using snapshot + reason, but no hysteresis/counters)
         self.intersection_snapshot = None   # (front,left,back,right) captured on entry
         self.intersection_reason = None     # 'front_blocked' | 'back_blocked' | 'side_open' | 'unknown'
 
         # Main control timer
         self.timer = self.create_timer(1.0 / self.CTRL_HZ, self._control_tick)
-
-        
 
     # --------------- Subscribers ----------------
     def _on_scan(self, msg: LaserScan):
@@ -232,8 +210,6 @@ class CorridorExplorer(Node):
             self.get_logger().warn(f"Scan indexing issue: {e}")
             return None
 
-    def _is_inf_or_max(self, val):
-        return math.isinf(val) or (val >= self.MAX_RANGE - 0.01)
 
     def _publish_height(self):
         msg = Float32()
@@ -241,7 +217,6 @@ class CorridorExplorer(Node):
         self.height_pub.publish(msg)
 
     def _send_vel(self, vx=0.0, vy=0.0, wz=0.0):
-
         # Replace NaN or Inf with zero to prevent invalid commands (the sim nan joint velocity value error)
         for val_name, val in zip(["vx", "vy", "wz"], [vx, vy, wz]):
             if not math.isfinite(val):
@@ -292,60 +267,40 @@ class CorridorExplorer(Node):
             wz = self._corridor_yaw_control(left, right, forward=True)
             self._send_vel(self.V_CORRIDOR, 0.0, wz)
 
-            # Intersection detection from corridor (forward rules) with cooldown + side-open hysteresis
-            if (time.time() - self.last_intersection_exit_time) >= self.INTERSECTION_COOLDOWN:
-                side_open = self._is_inf_or_max(left) or self._is_inf_or_max(right)
-                if side_open:
-                    self.side_open_counter += 1
+            # Intersection detection from corridor (forward rules) - immediate, no hysteresis/cooldown
+            if (front < self.FRONT_T) or (left >= self.SIDE_OPEN) or (right >= self.SIDE_OPEN):
+
+                self.state = State.INTERSECTION
+                self.came_from_backwards_corridor = False
+                # reason + snapshot
+                if front < self.FRONT_T:
+                    self.intersection_reason = 'front_blocked'
+                elif (left >= self.SIDE_OPEN) or (right >= self.SIDE_OPEN):
+                    self.intersection_reason = 'side_open'
                 else:
-                    self.side_finite_counter = 0
-                    self.side_open_counter = 0
-                    self.last_intersection_exit_time = time.time()
-
-
-                if (front < self.FRONT_T) or (self.side_open_counter >= self.SIDE_OPEN_REQ):
-                    self.state = State.INTERSECTION
-                    self.came_from_backwards_corridor = False
-                    # reason + snapshot
-                    if front < self.FRONT_T:
-                        self.intersection_reason = 'front_blocked'
-                    elif self.side_open_counter >= self.SIDE_OPEN_REQ:
-                        self.intersection_reason = 'side_open'
-                    else:
-                        self.intersection_reason = 'unknown'
-                    self.intersection_snapshot = (front, left, back, right)
-                    self._log_state(self.state)
-
+                    self.intersection_reason = 'unknown'
+                self.intersection_snapshot = (front, left, back, right)
+                self._log_state(self.state)
 
         elif self.state == State.BACKWARDS_THROUGH_CORRIDOR:
             # Move backwards with flipped yaw correction
             wz = self._corridor_yaw_control(left, right, forward=False)
             self._send_vel(-self.V_CORRIDOR, 0.0, wz)
 
-            # Intersection detection from corridor (backwards rules) with cooldown + side-open hysteresis
-            if (time.time() - self.last_intersection_exit_time) >= self.INTERSECTION_COOLDOWN:
-                side_open = self._is_inf_or_max(left) or self._is_inf_or_max(right)
-                if side_open:
-                    self.side_open_counter += 1
+            # Intersection detection from corridor (backwards rules) - immediate
+            if (back < self.FRONT_T) or (left >= self.SIDE_OPEN) or (right >= self.SIDE_OPEN):
+
+                self.state = State.INTERSECTION
+                self.came_from_backwards_corridor = True
+                # reason + snapshot
+                if back < self.FRONT_T:
+                    self.intersection_reason = 'back_blocked'
+                elif (left >= self.SIDE_OPEN) or (right >= self.SIDE_OPEN):
+                    self.intersection_reason = 'side_open'
                 else:
-                    self.side_finite_counter = 0
-                    self.side_open_counter = 0
-                    self.last_intersection_exit_time = time.time()
-
-
-                if (back < self.FRONT_T) or (self.side_open_counter >= self.SIDE_OPEN_REQ):
-                    self.state = State.INTERSECTION
-                    self.came_from_backwards_corridor = True
-                    # reason + snapshot
-                    if back < self.FRONT_T:
-                        self.intersection_reason = 'back_blocked'
-                    elif self.side_open_counter >= self.SIDE_OPEN_REQ:
-                        self.intersection_reason = 'side_open'
-                    else:
-                        self.intersection_reason = 'unknown'
-                    self.intersection_snapshot = (front, left, back, right)
-                    self._log_state(self.state)
-
+                    self.intersection_reason = 'unknown'
+                self.intersection_snapshot = (front, left, back, right)
+                self._log_state(self.state)
 
         elif self.state == State.INTERSECTION:
             # Decide next state based on priorities (using snapshot to avoid flicker).
@@ -412,16 +367,15 @@ class CorridorExplorer(Node):
             else:
                 self._send_vel(-self.V_CORRIDOR, 0.0, 0.0)
 
-            if (not self._is_inf_or_max(left)) and (not self._is_inf_or_max(right)):
+            if (left < self.SIDE_OPEN) and (right < self.SIDE_OPEN):
+
                 # Enter corridor mode with centring (forward/back as per last action)
                 if self._exiting_forward:
-                    self.state = State.STRAIGHT_THROUGH_CORRIDOR
                     self.state = State.STRAIGHT_THROUGH_CORRIDOR
                     self.came_from_backwards_corridor = False
                 else:
                     self.state = State.BACKWARDS_THROUGH_CORRIDOR
                     self.came_from_backwards_corridor = True
-                    self.state = State.STRAIGHT_THROUGH_CORRIDOR
                 self._log_state(self.state)
 
         else:
@@ -461,14 +415,14 @@ class CorridorExplorer(Node):
     def _choose_intersection_next(self, front, left, right):
         """
         Decide next state using the snapshot captured on INTERSECTION entry.
-        Mirrors forward/back logic:
+        Mirrors forward/back logic WITHOUT hysteresis:
         - If trigger was front_blocked -> forbid GO_STRAIGHT.
         - If trigger was back_blocked  -> forbid GO_BACKWARDS.
-        Availability (with hysteresis on the blocked direction):
-        forward_ok = f_s >= FRONT_T + FRONT_HYS
-        backward_ok = b_s >= FRONT_T + FRONT_HYS
-        right_ok = side opening (inf/max)
-        left_ok  = side opening (inf/max)
+        Availability (no hysteresis):
+          forward_ok  = f_s >= FRONT_T
+          backward_ok = b_s >= FRONT_T
+          right_ok    = side thresh
+          left_ok     = side thresh
         Priorities:
         - Normal: forward > right > left > backwards
         - From backwards corridor: backwards > right > left > forward
@@ -477,19 +431,20 @@ class CorridorExplorer(Node):
         if self.intersection_snapshot is not None:
             f_s, l_s, b_s, r_s = self.intersection_snapshot
         else:
-            # Fallback to current (should be rare)
             rng = self._ranges()
             if rng is not None:
                 f_s, l_s, b_s, r_s = rng
             else:
-                # If we truly have nothing, play it safe and stop
                 return State.GO_BACKWARDS if self.came_from_backwards_corridor else State.GO_STRAIGHT
 
-        # Availability with hysteresis on the forward/backward blocking directions
-        forward_ok  = (f_s >= (self.FRONT_T + self.FRONT_HYS))
-        backward_ok = (b_s >= (self.FRONT_T + self.FRONT_HYS))
-        right_ok    = self._is_inf_or_max(r_s)
-        left_ok     = self._is_inf_or_max(l_s)
+        # Availability (no hysteresis)
+        forward_ok  = (f_s >= self.FRONT_T)
+        backward_ok = (b_s >= self.FRONT_T)
+        right_ok = (r_s >= self.SIDE_OPEN)
+        left_ok  = (l_s >= self.SIDE_OPEN)
+
+
+
 
         # Forbid the direction that actually triggered the intersection
         if self.intersection_reason == 'front_blocked':
@@ -515,7 +470,6 @@ class CorridorExplorer(Node):
             if left_ok:
                 return State.TURN_LEFT
             return State.GO_BACKWARDS
-
 
 
 def main():

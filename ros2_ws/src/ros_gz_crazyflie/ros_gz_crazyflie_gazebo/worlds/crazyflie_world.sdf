@@ -71,7 +71,7 @@
     <include>
       <uri>file:///home/ivans/crazyflie_mapping_demo/simulation_ws/crazyflie-simulation/simulator_files/gazebo//crazyflie</uri>
       <name>crazyflie</name>
-      <pose>-1.1452887412891061e-21 3.0657651236702424e-21 -5.4343321889346874e-07 1.8536551681422144e-19 1.4984171850906192e-19 5.6553816101651028e-22</pose>
+      <pose>-1.2193871664693713e-21 4.6558492455931324e-21 -5.330133215283861e-07 2.0075126159474106e-19 1.5015257346013117e-19 -6.2265801140014708e-21</pose>
     </include>
     <model name='wall2'>
       <pose>-2 0 0.5 0 0 0</pose>
@@ -297,118 +297,6 @@
       </link>
       <self_collide>false</self_collide>
     </model>
-    <model name='wall2_1_2_1'>
-      <pose>6.7190455746853566 -0.04803572393098901 0.5 0 0 0</pose>
-      <static>true</static>
-      <link name='link'>
-        <visual name='visual'>
-          <geometry>
-            <box>
-              <size>0.20000000000000001 4 1</size>
-            </box>
-          </geometry>
-        </visual>
-        <pose>0 0 0 0 0 0</pose>
-        <inertial>
-          <pose>0 0 0 0 0 0</pose>
-          <mass>1</mass>
-          <inertia>
-            <ixx>1</ixx>
-            <ixy>0</ixy>
-            <ixz>0</ixz>
-            <iyy>1</iyy>
-            <iyz>0</iyz>
-            <izz>1</izz>
-          </inertia>
-        </inertial>
-        <enable_wind>false</enable_wind>
-      </link>
-      <self_collide>false</self_collide>
-    </model>
-    <model name='wall2_1_2_2'>
-      <pose>6.7233244982660185 -3.9282648889182772 0.5 0 0 0</pose>
-      <static>true</static>
-      <link name='link'>
-        <visual name='visual'>
-          <geometry>
-            <box>
-              <size>0.20000000000000001 4 1</size>
-            </box>
-          </geometry>
-        </visual>
-        <pose>0 0 0 0 0 0</pose>
-        <inertial>
-          <pose>0 0 0 0 0 0</pose>
-          <mass>1</mass>
-          <inertia>
-            <ixx>1</ixx>
-            <ixy>0</ixy>
-            <ixz>0</ixz>
-            <iyy>1</iyy>
-            <iyz>0</iyz>
-            <izz>1</izz>
-          </inertia>
-        </inertial>
-        <enable_wind>false</enable_wind>
-      </link>
-      <self_collide>false</self_collide>
-    </model>
-    <model name='wall2_1_2_1_1'>
-      <pose>6.3479015494282498 0.043822281479075187 0.5 0 0 0</pose>
-      <static>true</static>
-      <link name='link'>
-        <visual name='visual'>
-          <geometry>
-            <box>
-              <size>0.20000000000000001 4 1</size>
-            </box>
-          </geometry>
-        </visual>
-        <pose>0 0 0 0 0 0</pose>
-        <inertial>
-          <pose>0 0 0 0 0 0</pose>
-          <mass>1</mass>
-          <inertia>
-            <ixx>1</ixx>
-            <ixy>0</ixy>
-            <ixz>0</ixz>
-            <iyy>1</iyy>
-            <iyz>0</iyz>
-            <izz>1</izz>
-          </inertia>
-        </inertial>
-        <enable_wind>false</enable_wind>
-      </link>
-      <self_collide>false</self_collide>
-    </model>
-    <model name='wall2_1_2_1_2'>
-      <pose>6.3495707701291106 -3.8867950814661429 0.5 0 0 0</pose>
-      <static>true</static>
-      <link name='link'>
-        <visual name='visual'>
-          <geometry>
-            <box>
-              <size>0.20000000000000001 4 1</size>
-            </box>
-          </geometry>
-        </visual>
-        <pose>0 0 0 0 0 0</pose>
-        <inertial>
-          <pose>0 0 0 0 0 0</pose>
-          <mass>1</mass>
-          <inertia>
-            <ixx>1</ixx>
-            <ixy>0</ixy>
-            <ixz>0</ixz>
-            <iyy>1</iyy>
-            <iyz>0</iyz>
-            <izz>1</izz>
-          </inertia>
-        </inertial>
-        <enable_wind>false</enable_wind>
-      </link>
-      <self_collide>false</self_collide>
-    </model>
     <model name='wall4_2_1_1'>
       <pose>5.7984102583563182 4.8713404119806993 0.5 0 0 1.5700000841906609</pose>
       <static>true</static>
@@ -578,7 +466,7 @@
       <self_collide>false</self_collide>
     </model>
     <model name='wall3_1'>
-      <pose>-0.42545012439432517 1.1665967479141159 0.5 0 0 1.5700000841906603</pose>
+      <pose>-0.42545012439432517 1.1665967479141159 0.5 0 0 1.5700000841906609</pose>
       <static>true</static>
       <link name='link'>
         <visual name='visual'>
@@ -606,7 +494,7 @@
       <self_collide>false</self_collide>
     </model>
     <model name='wall3_2'>
-      <pose>3.2806114973699954 1.1477639948831218 0.5 0 0 1.5700000841906603</pose>
+      <pose>3.2806114973699954 1.1477639948831218 0.5 0 0 1.5700000841906609</pose>
       <static>true</static>
       <link name='link'>
         <visual name='visual'>
@@ -634,7 +522,63 @@
       <self_collide>false</self_collide>
     </model>
     <model name='wall3_3'>
-      <pose>5.6550496737669205 1.1586302299196041 0.5 0 0 1.5700000841906603</pose>
+      <pose>5.6550496737669205 1.1586302299196041 0.5 0 0 1.5700000841906609</pose>
+      <static>true</static>
+      <link name='link'>
+        <visual name='visual'>
+          <geometry>
+            <box>
+              <size>0.20000000000000001 4 1</size>
+            </box>
+          </geometry>
+        </visual>
+        <pose>0 0 0 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>1</mass>
+          <inertia>
+            <ixx>1</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>1</iyy>
+            <iyz>0</iyz>
+            <izz>1</izz>
+          </inertia>
+        </inertial>
+        <enable_wind>false</enable_wind>
+      </link>
+      <self_collide>false</self_collide>
+    </model>
+    <model name='wall2_1_2_1'>
+      <pose>7.3320484439815594 -0.63444346838170418 0.5 0 0 0</pose>
+      <static>true</static>
+      <link name='link'>
+        <visual name='visual'>
+          <geometry>
+            <box>
+              <size>0.20000000000000001 4 1</size>
+            </box>
+          </geometry>
+        </visual>
+        <pose>0 0 0 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>1</mass>
+          <inertia>
+            <ixx>1</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>1</iyy>
+            <iyz>0</iyz>
+            <izz>1</izz>
+          </inertia>
+        </inertial>
+        <enable_wind>false</enable_wind>
+      </link>
+      <self_collide>false</self_collide>
+    </model>
+    <model name='wall2_1_2_2'>
+      <pose>7.3248804254498374 -4.5268296967271571 0.5 0 0 0</pose>
       <static>true</static>
       <link name='link'>
         <visual name='visual'>
