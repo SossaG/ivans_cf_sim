@@ -99,7 +99,7 @@ class CF3DExplorer(Node):
         self.declare_parameter('clearance_ceiling_m', 0.20) # >= 20 cm from ceiling
 
         # Manual band used when ranges are missing: [0.20, 1.50] m
-        self.declare_parameter('abs_min_height_m', 0.20)
+        self.declare_parameter('abs_min_height_m', 0.10)
         self.declare_parameter('abs_max_height_m', 0.5)
         self.declare_parameter('range_fresh_timeout_s', 0.6)
 

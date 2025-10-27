@@ -467,6 +467,10 @@ class CorridorExplorer(Node):
 
             if (left < self.SIDE_OPEN) and (right < self.SIDE_OPEN):
                 # Enter corridor mode with centring (forward/back as per last action)
+
+                # Both sides are now closed — wait briefly before resuming corridor mode
+                time.sleep(2)
+
                 if self._exiting_forward:
                     self.state = State.STRAIGHT_THROUGH_CORRIDOR
                     self.came_from_backwards_corridor = False
@@ -483,31 +487,93 @@ class CorridorExplorer(Node):
     def _corridor_yaw_control(self, left, right, forward=True):
         """
         Centre between side walls using left/right ranges.
-        If right > left (more space on the right, you're closer to the left wall),
-        you should yaw RIGHT (negative wz). Hence the leading minus sign.
-        For backwards motion we flip the sign so the behaviour is mirrored.
+        P -> PD (+optional I) with measurement filtering, anti-windup, and rate limiting.
+        Sign convention preserved. Flip when reversing so behaviour mirrors.
         """
-        # difference: positive when more space on right than left
-        diff = (right - left)
 
-        # small deadband to avoid twitch
-        if abs(diff) < 0.02:
-            diff = 0.0
+        # --- guard non-finite beams (when side is open, LaserScan can give inf) ---
+        ls = getattr(self, "last_scan", None)
+        rmax = (float(ls.range_max) if (ls is not None and math.isfinite(ls.range_max))
+                else getattr(self, "RANGE_MAX", 3.5))
+        if not math.isfinite(left):  left  = rmax
+        if not math.isfinite(right): right = rmax
 
-        # correct sign: negative turns right when right-left > 0 (closer to left wall)
-        wz_cmd = -self.K_YAW * diff
+        # --- config (tune these) ---
+        Kp = self.K_YAW                     # keep your existing proportional gain
+        Kd = getattr(self, "K_D_YAW", 0.0)  # start with 0.5–2.0 * Kp (units: 1/s)
+        Ki = getattr(self, "K_I_YAW", 0.0)  # start at 0; if needed, 0.05–0.2 * Kp
+        deadband = getattr(self, "YAW_DEADBAND", 0.02)
+        max_wz = self.MAX_YAW               # keep your existing clamp
+        max_dwz = getattr(self, "MAX_DWZ", 1.0)  # rad/s^2 rate limit (tune)
+        # simple low-pass on measurement: alpha ~ exp(-Ts/tau)
+        diff_tau = getattr(self, "YAW_DIFF_FILTER_TAU", 0.15)  # s (tune 0.1–0.3)
 
-        # flip when reversing so the “keep straight” logic feels the same
+        # --- time base ---
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if not hasattr(self, "_yaw_ctrl_last_t"):
+            self._yaw_ctrl_last_t = now
+            self._yaw_diff_f = 0.0
+            self._yaw_diff_prev = 0.0
+            self._yaw_i = 0.0
+            self._wz_prev = 0.0
+        dt = max(1e-3, now - self._yaw_ctrl_last_t)  # avoid div/0
+        self._yaw_ctrl_last_t = now
+
+        # --- error (difference: + when more space on right) ---
+        raw_diff = (right - left)
+
+        # deadband
+        if abs(raw_diff) < deadband:
+            raw_diff = 0.0
+
+        # low-pass filter the diff (on measurement to avoid D-noise amplification)
+        alpha = max(0.0, min(1.0, dt / (diff_tau + dt)))
+        diff = (1 - alpha) * getattr(self, "_yaw_diff_f", 0.0) + alpha * raw_diff
+        self._yaw_diff_f = diff
+
+        # derivative of measurement (D on measurement = -D on error)
+        d_diff = (diff - self._yaw_diff_prev) / dt
+        self._yaw_diff_prev = diff
+        if not math.isfinite(d_diff):
+            d_diff = 0.0
+
+
+        # integral with simple anti-windup clamp
+        if Ki != 0.0:
+            self._yaw_i += diff * dt
+            # back off integral if we're saturating later (simple clamping here)
+            i_limit = getattr(self, "YAW_I_LIMIT", 1.0)  # rad/s-equivalent
+            if self._yaw_i > i_limit: self._yaw_i = i_limit
+            if self._yaw_i < -i_limit: self._yaw_i = -i_limit
+
+        # core PD(+I) law: negative sign so positive diff -> turn right (negative wz)
+        wz_cmd = -(Kp * diff + Ki * getattr(self, "_yaw_i", 0.0) - Kd * d_diff)
+        # note: minus Kp*e - Ki*∫e - Kd*de/dt == -(Kp*diff + Ki*int - Kd*d_diff)
+
+        # mirror when reversing
         if not forward:
             wz_cmd = -wz_cmd
 
-        # clamp
-        if wz_cmd > self.MAX_YAW:
-            wz_cmd = self.MAX_YAW
-        elif wz_cmd < -self.MAX_YAW:
-            wz_cmd = -self.MAX_YAW
+            # ensure finite before rate limit/clamp
+        if not math.isfinite(wz_cmd):
+            wz_cmd = 0.0
 
+        # rate limit to reduce snap-induced oscillation
+        dwz = (wz_cmd - self._wz_prev) / dt
+        if dwz > max_dwz:
+            wz_cmd = self._wz_prev + max_dwz * dt
+        elif dwz < -max_dwz:
+            wz_cmd = self._wz_prev - max_dwz * dt
+
+        # clamp
+        if wz_cmd > max_wz:
+            wz_cmd = max_wz
+        elif wz_cmd < -max_wz:
+            wz_cmd = -max_wz
+
+        self._wz_prev = wz_cmd
         return wz_cmd
+
 
     def _choose_intersection_next(self, front, left, right):
         """
