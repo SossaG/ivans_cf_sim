@@ -42,6 +42,8 @@ class State(Enum):
     EXITING_INTERSECTION = auto()
     # NEW: forward confirmation approach after front hit primary threshold
     FORWARD_APPROACH_CONFIRM = auto()
+    # NEW: 2s straight roll-in (yaw locked) before turning when intersection wasn't from a front wall
+    PRETURN_STRAIGHT = auto()
 
 class CorridorExplorer(Node):
     def __init__(self):
@@ -66,13 +68,15 @@ class CorridorExplorer(Node):
         self.declare_parameter('nudge_v', 0.1)                # m/s (forward/back short nudge)
 
         # Stronger, sign-correct centring control
-        self.declare_parameter('yaw_k', 0.8)                  # P-gain for wall centring
-        self.declare_parameter('max_yaw_rate', 0.8)           # rad/s clamp for centring
+        self.declare_parameter('yaw_k', 0.6)                  # P-gain for wall centring
+        self.declare_parameter('max_yaw_rate', 0.5)           # rad/s clamp for centring
 
         self.declare_parameter('turn_rate', 0.6)              # rad/s (stationary turn)
         self.declare_parameter('turn_angle_deg', 90.0)        # degrees
         self.declare_parameter('nudge_duration_s', 0.7)       # seconds to publish the post-turn/back/straight nudge
         self.declare_parameter('control_rate_hz', 20.0)       # main loop rate
+        # NEW: duration of straight roll-in before turning (no launch arg; param only)
+        self.declare_parameter('preturn_straight_s', 4.0)
 
         # Logging control
         self.declare_parameter('log_ranges_on_state', True)   # log F/L/B/R on state change
@@ -97,6 +101,7 @@ class CorridorExplorer(Node):
         self.TURN_ANGLE = math.radians(float(self.get_parameter('turn_angle_deg').value))
         self.NUDGE_DT = float(self.get_parameter('nudge_duration_s').value)
         self.CTRL_HZ = float(self.get_parameter('control_rate_hz').value)
+        self.PRETURN_DT = float(self.get_parameter('preturn_straight_s').value)
 
         self.LOG_RANGES_ON_STATE = bool(self.get_parameter('log_ranges_on_state').value)
 
@@ -123,6 +128,10 @@ class CorridorExplorer(Node):
         self.came_from_backwards_corridor = False  # for intersection priority rule
         self._nudge_until = 0.0                    # time until which to keep nudging
         self._exiting_forward = True               # which direction we’re exiting intersection with
+
+        # NEW: preturn straight timer + queued turn state
+        self._preturn_until = 0.0
+        self._pending_turn_state = None
 
         # Scan mapping: indices for front/left/back/right beams (computed from angles)
         self.idx_front = None
@@ -363,6 +372,9 @@ class CorridorExplorer(Node):
         elif self.state == State.INTERSECTION:
             # Decide next state based on priorities (using snapshot to avoid flicker).
             next_state = self._choose_intersection_next(front, left, right)
+            reason_before = self.intersection_reason  # keep before clearing
+            came_from_back = self.came_from_backwards_corridor
+
             self.state = next_state
 
             # Decision taken; clear snapshot to avoid stale data affecting next intersections
@@ -370,6 +382,14 @@ class CorridorExplorer(Node):
             self.intersection_reason = None
 
             self._log_state(self.state)
+
+            # NEW: if turning L/R and this wasn't a front-approach case, roll straight first with yaw locked
+            if self.state in (State.TURN_LEFT, State.TURN_RIGHT) and reason_before != 'front_blocked':
+                self._pending_turn_state = self.state
+                self._preturn_until = now + self.PRETURN_DT
+                self._roll_in_forward = (not came_from_back)  # keep direction we arrived with
+                self.state = State.PRETURN_STRAIGHT
+                self._log_state(self.state)
 
             if self.state in (State.TURN_LEFT, State.TURN_RIGHT):
                 # Set turn target
@@ -379,6 +399,26 @@ class CorridorExplorer(Node):
                 self._nudge_until = now + self.NUDGE_DT  # brief forward nudge before EXITING_INTERSECTION
             elif self.state == State.GO_BACKWARDS:
                 self._nudge_until = now + self.NUDGE_DT  # brief backward nudge before EXITING_INTERSECTION
+
+        elif self.state == State.PRETURN_STRAIGHT:
+            # YAW LOCKED: drive straight for PRETURN_DT seconds, keeping the same straight direction we arrived with.
+            if now < self._preturn_until:
+                vx = self.V_CORRIDOR if getattr(self, '_roll_in_forward', True) else -self.V_CORRIDOR
+                self._send_vel(vx, 0.0, 0.0)  # wz = 0 (locked)
+            else:
+                # Time to perform the queued turn.
+                if self._pending_turn_state is None:
+                    # Safety fallback
+                    self.state = State.GO_STRAIGHT
+                    self._nudge_until = now + self.NUDGE_DT
+                    self._log_state(self.state)
+                else:
+                    self.state = self._pending_turn_state
+                    self._pending_turn_state = None
+                    # Establish the turn target yaw
+                    sign = +1.0 if self.state == State.TURN_LEFT else -1.0
+                    self.turn_target_yaw = ang_wrap(self.yaw + sign * self.TURN_ANGLE)
+                    self._log_state(self.state)
 
         elif self.state == State.TURN_LEFT or self.state == State.TURN_RIGHT:
             # Perform stationary turn toward target yaw
@@ -506,21 +546,22 @@ class CorridorExplorer(Node):
         elif self.intersection_reason == 'back_blocked':
             backward_ok = False
 
+        # NEW priorities:
         if self.came_from_backwards_corridor:
-            # Priority: backwards > right > left > forward
-            if backward_ok:
-                return State.GO_BACKWARDS
+            # Right > Backwards > Left > Forward
             if right_ok:
                 return State.TURN_RIGHT
+            if backward_ok:
+                return State.GO_BACKWARDS
             if left_ok:
                 return State.TURN_LEFT
             return State.GO_STRAIGHT
         else:
-            # Priority: forward > right > left > backwards
-            if forward_ok:
-                return State.GO_STRAIGHT
+            # Right > Forward > Left > Backwards
             if right_ok:
                 return State.TURN_RIGHT
+            if forward_ok:
+                return State.GO_STRAIGHT
             if left_ok:
                 return State.TURN_LEFT
             return State.GO_BACKWARDS
