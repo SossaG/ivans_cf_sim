@@ -78,7 +78,7 @@ class PushToMoveTeleop(Node):
         self.declare_parameter('max_linear', 0.5)
         self.declare_parameter('max_angular', 1.0)
         self.declare_parameter('hold_timeout_ms', 150.0)
-        self.declare_parameter('inactivity_stop_s', 15.0)
+        self.declare_parameter('inactivity_stop_s', 3.0)
 
         self.cmd_vel_topic = self.get_parameter('cmd_vel_topic').get_parameter_value().string_value
         self.height_topic  = self.get_parameter('height_direc_topic').get_parameter_value().string_value
