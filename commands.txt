@@ -55,7 +55,9 @@ python3 gc_vel_mux.py --ros-args -p odom_topic:=/crazyflie/odom -p height_offset
 ros2 launch my_sim_master_bringup.py \
   world_frame_id:=map body_frame_id:=crazyflie/odom \
   odom_topic:=/crazyflie/odom scan_topic:=/crazyflie/scan \
-  cloud_in:=/crazyflie/pointcloud cmd_vel_topic:=/auto_cmd_vel height_offset:=0.1
+  cloud_in:=/crazyflie/pointcloud cmd_vel_topic:=/auto_cmd_vel height_offset:=0.3
 
 
 ros2 launch my_real_master_bringup.py
+
+export GZ_SIM_RESOURCE_PATH="/home/$USER/crazyflie_mapping_demo/simulation_ws/crazyflie-simulation/simulator_files/gazebo/"
